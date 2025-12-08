@@ -2,11 +2,12 @@
 # filename: resolver.py
 # -----------------------------------------------------------------------------
 # Project: Filtering DNS Server (Refactored)
-# Version: 6.8.0 (Query GeoIP Fix)
+# Version: 6.9.0 (GeoIP Block Response Fix)
 # -----------------------------------------------------------------------------
 """
 Core DNS Resolution & Processing Logic.
 Now supports GeoIP filtering on Queries (via ccTLD) and Answers.
+Fixed: GeoIP blocking now returns immediately without triggering CNAME collapse.
 """
 
 import asyncio
@@ -931,7 +932,6 @@ class DNSHandler:
                             matched_rule = rrset_matched_rule
                             matched_list = rrset_matched_list
                             matched_target = rrset_matched_target
-                            # Don't add this rrset to safe_rrsets (filtered out)
                             continue
                     
                     # Only add to safe_rrsets if not blocked/dropped
@@ -941,15 +941,18 @@ class DNSHandler:
                 section.clear()
                 section.extend(safe_rrsets)
 
-        # Check if filtering left us with an empty answer section
-        if not response.answer and matched_action:
-            if matched_action == "DROP":
-                req_logger.info(f"🔇 DROPPED | Reason: All IPs Filtered - Empty Response")
-                return None
-            elif matched_action == "BLOCK":
-                req_logger.info(f"⛔ BLOCKED | Reason: All IPs Filtered - Empty Response")
-                return self.create_block_response(request, request.question[0].name, qtype)
+            # Check if filtering left us with an empty answer section
+            if not response.answer and matched_action:
+                if matched_action == "DROP":
+                    req_logger.info(f"🔇 DROPPED | Reason: All IPs Filtered - Empty Response")
+                    return None
+                elif matched_action == "BLOCK":
+                    req_logger.info(f"⛔ BLOCKED | Reason: All IPs Filtered - Empty Response")
+                    blocked_response = self.create_block_response(request, request.question[0].name, qtype)
+                    self.cache.put_dns(blocked_response, qname_norm, qtype, group=group_key, scope=policy_name, req_logger=req_logger)
+                    return blocked_response
 
+        # Response modifications (only if we didn't return early above)
         self.collapse_cnames(response, req_logger)
         self.minimize_response(response)
         self.modify_ttls(response, req_logger)
