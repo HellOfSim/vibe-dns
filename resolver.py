@@ -2,7 +2,7 @@
 # filename: resolver.py
 # -----------------------------------------------------------------------------
 # Project: Filtering DNS Server (Refactored)
-# Version: 6.7.0 (Strict CNAME Collapse)
+# Version: 6.8.0 (Query GeoIP Fix)
 # -----------------------------------------------------------------------------
 """
 Core DNS Resolution & Processing Logic.
@@ -709,12 +709,11 @@ class DNSHandler:
 
         engine = self.rule_engines.get(policy_name)
         if engine:
-            # --- New PTR GeoIP Logic ---
+            # --- PTR GeoIP Logic ---
             if qtype == dns.rdatatype.PTR:
                 target_ip = self._extract_ip_from_ptr(qname_str)
                 if target_ip:
                     # Treat the PTR target IP as an "answer" for GeoIP checking
-                    # If the user has blocked @@OFAC, we check if target_ip is in OFAC
                     m_action, m_rule, m_list = engine.check_answer(None, target_ip, self.geoip)
                     
                     if m_action == 'BLOCK':
@@ -724,7 +723,7 @@ class DNSHandler:
                         req_logger.info(f"🔇 DROPPED | Reason: PTR GeoIP/Range Match | Target IP: {target_ip} | Rule: '{m_rule}' | List: '{m_list}'")
                         return None
 
-            # ... [Rest of logic: categorization, type check, domain blocking] ...
+            # Categorization
             matched_category = None
             if self.categorization_enabled and engine.categorizer:
                  cat_results = engine.categorizer.classify(qname_norm)
@@ -868,49 +867,81 @@ class DNSHandler:
              return reply
         
         if engine and (self.match_answers_globally or engine.has_answer_only_rules()):
+            matched_action = None
+            matched_rule = None
+            matched_list = None
+            matched_target = None
+            
             for section in (response.answer, response.authority, response.additional):
                 safe_rrsets = []
                 for rrset in section:
-                    matched_action = None
-                    matched_rule = None
-                    matched_list = None
-                    matched_target = None
+                    rrset_matched_action = None
+                    rrset_matched_rule = None
+                    rrset_matched_list = None
+                    rrset_matched_target = None
                     
                     if rrset.rdtype in [dns.rdatatype.A, dns.rdatatype.AAAA]:
                         for rdata in rrset:
                             ip_text = rdata.to_text()
                             
-                            matched_action, matched_rule, matched_list = engine.check_answer(
+                            rrset_matched_action, rrset_matched_rule, rrset_matched_list = engine.check_answer(
                                 None, ip_text, self.geoip, domain_hint=qname_norm
                             )
                             
-                            if matched_action and matched_action != "PASS":
-                                matched_target = ip_text
-                                req_logger.info(f"{'⛔ BLOCKED' if matched_action == 'BLOCK' else '🔇 DROPPED'} | Reason: Answer IP Match | IP: {matched_target} | Rule: '{matched_rule}' | List: '{matched_list}' | Policy: '{policy_name}' | Type: {dns.rdatatype.to_text(rrset.rdtype)}")
+                            if rrset_matched_action and rrset_matched_action != "PASS":
+                                rrset_matched_target = ip_text
+                                req_logger.info(
+                                    f"{'⛔ BLOCKED' if rrset_matched_action == 'BLOCK' else '🔇 DROPPED'} | "
+                                    f"Reason: Answer IP Match | IP: {rrset_matched_target} | "
+                                    f"Rule: '{rrset_matched_rule}' | List: '{rrset_matched_list}' | "
+                                    f"Policy: '{policy_name}' | Type: {dns.rdatatype.to_text(rrset.rdtype)}"
+                                )
                                 break
                                 
                     elif rrset.rdtype in [dns.rdatatype.CNAME, dns.rdatatype.MX, dns.rdatatype.PTR]:
                         for rdata in rrset:
                             target_norm = normalize_domain(str(rdata.target))
-                            matched_action, matched_rule, matched_list = engine.check_answer(target_norm, None, self.geoip)
-                            if matched_action and matched_action != "PASS":
-                                matched_target = target_norm
-                                req_logger.info(f"{'⛔ BLOCKED' if matched_action == 'BLOCK' else '🔇 DROPPED'} | Reason: Answer Domain Match | Domain: {matched_target} | Rule: '{matched_rule}' | List: '{matched_list}' | Policy: '{policy_name}' | Type: {dns.rdatatype.to_text(rrset.rdtype)}")
+                            rrset_matched_action, rrset_matched_rule, rrset_matched_list = engine.check_answer(
+                                target_norm, None, self.geoip
+                            )
+                            if rrset_matched_action and rrset_matched_action != "PASS":
+                                rrset_matched_target = target_norm
+                                req_logger.info(
+                                    f"{'⛔ BLOCKED' if rrset_matched_action == 'BLOCK' else '🔇 DROPPED'} | "
+                                    f"Reason: Answer Domain Match | Domain: {rrset_matched_target} | "
+                                    f"Rule: '{rrset_matched_rule}' | List: '{rrset_matched_list}' | "
+                                    f"Policy: '{policy_name}' | Type: {dns.rdatatype.to_text(rrset.rdtype)}"
+                                )
                                 break
                     
-                    if matched_action == "DROP":
-                        req_logger.info(f"🔇 DROPPED | Reason: Answer Match - Silent Drop | Trigger: {matched_target}")
+                    # Process the match result for this rrset
+                    if rrset_matched_action == "DROP":
+                        req_logger.info(f"🔇 DROPPED | Reason: Answer Match - Silent Drop | Trigger: {rrset_matched_target}")
                         return None
-                    elif matched_action == "BLOCK":
+                    elif rrset_matched_action == "BLOCK":
                         if self.ip_block_mode == 'block':
-                            req_logger.info(f"⛔ BLOCKED | Reason: Answer Match - Full Response Blocked | Trigger: {matched_target} | Mode: block (entire response)")
+                            req_logger.info(
+                                f"⛔ BLOCKED | Reason: Answer Match - Full Response Blocked | "
+                                f"Trigger: {rrset_matched_target} | Mode: block (entire response)"
+                            )
                             return self.create_block_response(request, request.question[0].name, qtype).to_wire()
-                    else:
+                        else:
+                            # Filter mode: store for later and skip this rrset
+                            matched_action = rrset_matched_action
+                            matched_rule = rrset_matched_rule
+                            matched_list = rrset_matched_list
+                            matched_target = rrset_matched_target
+                            # Don't add this rrset to safe_rrsets (filtered out)
+                            continue
+                    
+                    # Only add to safe_rrsets if not blocked/dropped
+                    if rrset_matched_action is None or rrset_matched_action == "PASS":
                         safe_rrsets.append(rrset)
                 
                 section.clear()
                 section.extend(safe_rrsets)
 
+        # Check if filtering left us with an empty answer section
         if not response.answer and matched_action:
             if matched_action == "DROP":
                 req_logger.info(f"🔇 DROPPED | Reason: All IPs Filtered - Empty Response")

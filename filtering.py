@@ -2,7 +2,7 @@
 # filename: filtering.py
 # -----------------------------------------------------------------------------
 # Project: Filtering DNS Server (Refactored)
-# Version: 6.6.0 (Full Region/Continent Query Blocking)
+# Version: 6.8.0 (Enhanced Query GeoIP Logging)
 # -----------------------------------------------------------------------------
 """
 Filtering Engine with IntervalTree for ranges and Map-based GeoIP.
@@ -87,8 +87,8 @@ class DomainCategorizer:
         self.regex_cache = {}
         
         try:
-            with open(categories_file, 'r') as f:
-                self.categories = json.load(f)
+            with open(categories_file, 'rb') as f:
+                self.categories = json.loads(f.read())
             
             for category, data in self.categories.items():
                 if 'patterns' in data:
@@ -151,13 +151,17 @@ class RuleEngine:
         self.answer_block_ips = IntervalTree()
         self.answer_block_regex = []
         
-        # Map location_spec -> list of (rule_text, list_name)
+        # Answer-only GeoIP rules
         self.answer_block_geoip = defaultdict(list)
+        self.answer_drop_geoip = defaultdict(list)
+        
+        # Query GeoIP rules (ccTLD-based)
+        self.query_block_geoip = defaultdict(list)
+        self.query_drop_geoip = defaultdict(list)
         
         self.answer_drop_trie = DomainTrie()
         self.answer_drop_ips = IntervalTree()
         self.answer_drop_regex = []
-        self.answer_drop_geoip = defaultdict(list)
         
         self.allowed_types = set()
         self.blocked_types = set()
@@ -213,8 +217,10 @@ class RuleEngine:
             
             if list_type == 'drop':
                 self.answer_drop_geoip[location_spec].append(data)
+                self.query_drop_geoip[location_spec].append(data)
             elif list_type == 'block':
                 self.answer_block_geoip[location_spec].append(data)
+                self.query_block_geoip[location_spec].append(data)
             else:
                 logger.warning(
                     f"⚠ GEO-IP rule only works in block/drop lists: {rule_text} | "
@@ -302,7 +308,7 @@ class RuleEngine:
         Returns (action, rule, list_name).
         Action is ALLOW/BLOCK/DROP/PASS.
         
-        Now supports GeoIP Query Blocking via ccTLD (Regions & Continents).
+        Supports GeoIP Query Blocking via ccTLD (Regions & Continents).
         """
         match = self.allow_trie.match(qname_norm)
         if match: 
@@ -318,18 +324,71 @@ class RuleEngine:
             
         # --- GeoIP Query Blocking (ccTLD check) ---
         if geoip_lookup and geoip_lookup.cctld_mapper and geoip_lookup.cctld_mapper.enabled:
+            logger.debug(f"🌍 Query GeoIP Check: Analyzing domain '{qname_norm}'")
+            
             cctld_country = geoip_lookup.cctld_mapper.get_country_from_domain(qname_norm)
             
             if cctld_country:
-                # We reuse check_answer logic but force the country code
-                action, rule, list_name = self.check_answer(
-                    None, None, geoip_lookup, 
-                    domain_hint=None, 
-                    country_override=cctld_country
-                )
+                logger.debug(f"  ✓ ccTLD Detected: .{qname_norm.split('.')[-1]} → Country: {cctld_country}")
                 
-                if action in ['BLOCK', 'DROP']:
-                    return action, rule, list_name
+                applicable_locations = set()
+                applicable_locations.add(cctld_country.upper())
+                
+                # Add continent
+                cont = geoip_lookup.cctld_mapper.get_continent_from_country(cctld_country)
+                if cont:
+                    applicable_locations.add(cont.upper())
+                    logger.debug(f"  ✓ Continent Mapped: {cctld_country} → {cont}")
+                
+                # Add regions
+                regs = geoip_lookup.cctld_mapper.get_regions_from_country(cctld_country)
+                if regs:
+                    for r in regs:
+                        applicable_locations.add(r.upper())
+                    logger.debug(f"  ✓ Regions Mapped: {cctld_country} → {', '.join(regs)}")
+                
+                logger.debug(f"  → Checking against {len(applicable_locations)} location tags: {', '.join(sorted(applicable_locations))}")
+                
+                # Check DROP
+                for loc in applicable_locations:
+                    if loc in self.query_drop_geoip:
+                        rule, list_name = self.query_drop_geoip[loc][0]
+                        logger.info(
+                            f"🔇 GEO-IP DROP (Query ccTLD) | "
+                            f"Domain: {qname_norm} | "
+                            f"TLD: .{qname_norm.split('.')[-1]} | "
+                            f"Country: {cctld_country} | "
+                            f"Matched: {loc} | "
+                            f"Rule: '{rule}' | "
+                            f"List: '{list_name}'"
+                        )
+                        return "DROP", rule, list_name
+                
+                # Check BLOCK
+                for loc in applicable_locations:
+                    if loc in self.query_block_geoip:
+                        rule, list_name = self.query_block_geoip[loc][0]
+                        logger.info(
+                            f"⛔ GEO-IP BLOCK (Query ccTLD) | "
+                            f"Domain: {qname_norm} | "
+                            f"TLD: .{qname_norm.split('.')[-1]} | "
+                            f"Country: {cctld_country} | "
+                            f"Matched: {loc} | "
+                            f"Rule: '{rule}' | "
+                            f"List: '{list_name}'"
+                        )
+                        return "BLOCK", rule, list_name
+                
+                logger.debug(f"  ✓ No GeoIP rules matched for {qname_norm} (Country: {cctld_country}, Locations: {', '.join(sorted(applicable_locations))})")
+            else:
+                logger.debug(f"  ✗ No ccTLD country mapping for domain '{qname_norm}' (TLD: .{qname_norm.split('.')[-1]})")
+        else:
+            if not geoip_lookup:
+                logger.debug(f"🌍 Query GeoIP Check: Skipped (geoip_lookup=None)")
+            elif not geoip_lookup.cctld_mapper:
+                logger.debug(f"🌍 Query GeoIP Check: Skipped (cctld_mapper not initialized)")
+            elif not geoip_lookup.cctld_mapper.enabled:
+                logger.debug(f"🌍 Query GeoIP Check: Skipped (cctld_mapper disabled)")
         
         return "PASS", None, None
 
@@ -460,6 +519,8 @@ class RuleEngine:
             'allow_domains': len(self.allow_trie.root),
             'block_domains': len(self.block_trie.root),
             'drop_domains': len(self.drop_trie.root),
+            'query_block_geoip': len(self.query_block_geoip),
+            'query_drop_geoip': len(self.query_drop_geoip),
             'answer_block_geoip': len(self.answer_block_geoip),
             'answer_drop_geoip': len(self.answer_drop_geoip),
             'answer_block_ips': len(self.answer_block_ips),

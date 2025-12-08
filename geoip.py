@@ -28,6 +28,11 @@ class GeoIPLookup:
         self.mode = 'binary_mmap'
         
         geoip_cfg = config.get('geoip', {})
+
+        # ALWAYS initialize mapper for Query Blocking
+        self.cctld_mode = geoip_cfg.get('cctld_mode', 'geoip_only')
+        self.cctld_mapper = CCTLDMapper(enabled=True)
+
         if not geoip_cfg.get('enabled', False):
             logger.info("GeoIP: DISABLED")
             return

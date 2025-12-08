@@ -2,7 +2,7 @@
 # filename: list_manager.py
 # -----------------------------------------------------------------------------
 # Project: Filtering DNS Server (Refactored)
-# Version: 4.0.0 (DROP Action + GeoIP)
+# Version: 4.1.0 (Query GeoIP Support)
 # -----------------------------------------------------------------------------
 """
 List Management Module with DROP action and GeoIP support.
@@ -154,7 +154,7 @@ class ListManager:
             # Allow @ for Answer blocking and GeoIP
             clean_check = line[1:] if line.startswith('@') else line
             
-            # GeoIP rules: @@COUNTRY, @@CONTINENT
+            # GeoIP rules: @@COUNTRY, @@CONTINENT, @@REGION
             if clean_check.startswith('@'):
                 valid_rules.add(line)
                 continue
@@ -173,7 +173,7 @@ class ListManager:
             
             domain = None
             
-            if parts[0] in ['0.0.0.0', '127.0.0.1', '::']:
+            if parts[0] in ['0.0.0.0', '127.0.0.1', '::', '::1']:
                 if len(parts) >= 2: 
                     domain = parts[1]
             elif len(parts) == 1:
@@ -268,13 +268,23 @@ class ListManager:
         # Enhanced summary with GEO-IP stats
         summary = f"Policy '{policy_name}' Ready: {b_count} Block, {d_count} Drop, {a_count} Allow rules"
         if geoip_count > 0:
-            summary += f" | 🌍 {geoip_count} GEO-IP rules"
+            summary += f" | 🌍 {geoip_count} GEO-IP rules (Query + Answer)"
             logger.info(f"✓ {summary}")
         else:
             logger.info(f"✓ {summary}")
         
         # Call get_stats to trigger detailed GEO-IP logging
         stats = engine.get_stats()
+        if stats.get('query_block_geoip', 0) > 0 or stats.get('query_drop_geoip', 0) > 0:
+            logger.info(
+                f"  → Query GeoIP: {stats.get('query_block_geoip', 0)} BLOCK, "
+                f"{stats.get('query_drop_geoip', 0)} DROP (ccTLD-based)"
+            )
+        if stats.get('answer_block_geoip', 0) > 0 or stats.get('answer_drop_geoip', 0) > 0:
+            logger.info(
+                f"  → Answer GeoIP: {stats.get('answer_block_geoip', 0)} BLOCK, "
+                f"{stats.get('answer_drop_geoip', 0)} DROP (IP-based)"
+            )
     
         return engine
 
