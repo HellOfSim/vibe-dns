@@ -2,14 +2,12 @@
 # Vibe-DNS Automated Build & Release Pipeline
 # ==============================================================================
 # This workflow compiles Python scripts into standalone executables for:
-#   - Linux (Generic glibc 2.31+ compatibility via Debian 11 container)
-#   - Windows (x86_64)
+#   - Linux (Generic glibc 2.28+ compatibility via Debian 10 container)
 #   - macOS (Apple Silicon / ARM64)
 #
 # NAMING CONVENTION:
-# Executables are now named per-platform, e.g.:
+# Executables are named per-platform, e.g.:
 #   vibe-dns-server-linux-amd64
-#   geoip-compiler-windows-amd64.exe
 # ==============================================================================
 
 name: Build Vibe-DNS Binaries
@@ -34,18 +32,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # --- Linux (Generic) ---
-          # Compatibility: Ubuntu 20.04+, Debian 11+, RHEL 9+.
+          # --- Linux (Generic / Legacy Support) ---
+          # FIX: Build on Debian 10 (Buster) with Python 3.11.
+          # This links against glibc 2.28, supporting older systems
+          # (Ubuntu 18.04+, Debian 10+, RHEL 8+) without crashing.
           - os: ubuntu-latest
             platform_name: linux-amd64
-            container_image: python:3.12-bullseye
+            # Using Python 3.11 because 3.12 is rarely available on Buster
+            container_image: python:3.11-buster
             executable_ext: ""
-
-          # --- Windows (x86_64) ---
-          - os: windows-latest
-            platform_name: windows-amd64
-            container_image: null
-            executable_ext: ".exe"
 
           # --- macOS (Apple Silicon) ---
           - os: macos-14
@@ -61,8 +56,8 @@ jobs:
       if: matrix.platform_name == 'linux-amd64'
       run: git config --global --add safe.directory '*'
 
-    # 2. SETUP PYTHON (Windows/Mac)
-    - name: Setup Python (Windows/Mac)
+    # 2. SETUP PYTHON (Mac)
+    - name: Setup Python (Mac)
       if: matrix.platform_name != 'linux-amd64'
       uses: actions/setup-python@v5
       with:
@@ -76,14 +71,14 @@ jobs:
         pip install -r requirements.txt
         pip install pyinstaller
 
-    # 4. BUILD SERVER (With Precise Naming)
+    # 4. BUILD SERVER
     - name: Build Server Binary
       run: |
         pyinstaller --clean --onefile \
           --name vibe-dns-server-${{ matrix.platform_name }}${{ matrix.executable_ext }} \
           server.py
 
-    # 5. BUILD COMPILER (With Precise Naming)
+    # 5. BUILD COMPILER
     - name: Build GeoIP Compiler Binary
       run: |
         pyinstaller --clean --onefile \
@@ -96,7 +91,7 @@ jobs:
       run: |
         mkdir -p release
         
-        # Move the specifically named binaries
+        # Move binaries
         mv dist/vibe-dns-server-${{ matrix.platform_name }}${{ matrix.executable_ext }} release/
         mv dist/geoip-compiler-${{ matrix.platform_name }}${{ matrix.executable_ext }} release/
         
@@ -105,14 +100,14 @@ jobs:
         cp categories.json release/
         cp geoip.txt release/
 
-    # 7. UPLOAD ARTIFACTS (For Inspection)
+    # 7. UPLOAD ARTIFACTS
     - name: Upload Build Artifacts
       uses: actions/upload-artifact@v4
       with:
         name: vibe-dns-${{ matrix.platform_name }}
         path: release/
 
-    # 8. PUBLISH RELEASE (On Tag Only)
+    # 8. PUBLISH RELEASE
     - name: Publish to GitHub Release
       uses: softprops/action-gh-release@v1
       if: startsWith(github.ref, 'refs/tags/')
