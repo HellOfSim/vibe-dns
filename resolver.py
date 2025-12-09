@@ -767,8 +767,9 @@ class DNSHandler:
             # Pass GeoIP lookup for Query Blocking
             action, rule, list_name = engine.is_blocked(qname_norm, geoip_lookup=self.geoip)
             if action == "BLOCK":
-                req_logger.info(f"⛔ BLOCKED | Reason: Domain/GeoIP Rule | Domain: {qname_norm} | Rule: '{rule}' | List: '{list_name}' | Policy: '{policy_name}'")
-                decision = {'action': 'BLOCK', 'reason': 'Domain Rule', 'rule': rule, 'list': list_name, 'category': ''}
+                reason = 'Query GeoIP Block' if '@@' in (rule or '') else 'Domain Rule'
+                req_logger.info(f"⛔ BLOCKED | Reason: {reason} | Domain: {qname_norm} | Rule: '{rule}' | List: '{list_name}' | Policy: '{policy_name}'")
+                decision = {'action': 'BLOCK', 'reason': reason, 'rule': rule, 'list': list_name, 'category': ''}
                 self.decision_cache.put_decision(qname_norm, qtype, group_key, policy_name, decision)
                 return self.create_block_response(request, qname, qtype).to_wire()
             elif action == "ALLOW":
