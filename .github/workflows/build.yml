@@ -1,75 +1,106 @@
+# ==============================================================================
+# Vibe-DNS Automated Build Pipeline
+# ==============================================================================
+# This workflow automates the compilation of Python scripts into standalone
+# executables for Linux, Windows, and macOS (Intel & Apple Silicon).
+# ==============================================================================
+
 name: Build Vibe-DNS Binaries
 
+# 1. TRIGGERS
+# Define when this workflow runs.
 on:
   push:
     branches: [ "main", "master" ]
   pull_request:
     branches: [ "main", "master" ]
 
+# 2. JOBS
 jobs:
   build:
     name: Build for ${{ matrix.platform_name }}
     runs-on: ${{ matrix.os }}
+    
+    # 3. STRATEGY MATRIX
     strategy:
       fail-fast: false
       matrix:
         include:
-          # --- Linux (Generic AMD64) ---
+          # --- Linux (Ubuntu/Generic) ---
+          # Target: Standard x86_64 Linux servers
           - os: ubuntu-latest
             platform_name: linux-amd64
             executable_ext: ""
 
-          # --- Windows (AMD64) ---
+          # --- Windows (x86_64) ---
+          # Target: Windows 10/11/Server (64-bit)
           - os: windows-latest
             platform_name: windows-amd64
             executable_ext: ".exe"
 
           # --- macOS (Apple Silicon) ---
+          # Target: M1/M2/M3 Macs (ARM64)
+          # Note: 'macos-14' is the runner for Apple Silicon
           - os: macos-14
             platform_name: macos-arm64
             executable_ext: ""
 
+          # --- macOS (Intel) ---
+          # Target: Older Macs (x86_64)
+          # Note: 'macos-13' is the runner for Intel Macs
+          - os: macos-13
+            platform_name: macos-amd64
+            executable_ext: ""
+
+    # 4. STEPS
     steps:
+    # A. Check out the code
     - uses: actions/checkout@v4
 
+    # B. Set up Python environment
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.12'
         cache: 'pip'
 
+    # C. Install Dependencies
     - name: Install Dependencies
       run: |
         pip install --upgrade pip
         pip install -r requirements.txt
         pip install pyinstaller
 
-    - name: Build Server
+    # D. Compile the Main Server
+    - name: Build Server Binary
       run: |
         pyinstaller --clean --onefile --name vibe-dns-server${{ matrix.executable_ext }} server.py
 
-    - name: Build GeoIP Compiler
+    # E. Compile the GeoIP Utility
+    - name: Build GeoIP Compiler Binary
       run: |
         pyinstaller --clean --onefile --name geoip-compiler${{ matrix.executable_ext }} geoip_compiler.py
 
-    - name: Organize Executables
+    # F. Organize Files for Release
+    - name: Prepare Release Artifacts
       shell: bash
       run: |
-        # Create the target directory
-        mkdir -p executables
-
-        # Move the compiled binaries from dist/ to executables/
-        mv dist/vibe-dns-server${{ matrix.executable_ext }} executables/
-        mv dist/geoip-compiler${{ matrix.executable_ext }} executables/
+        # 1. Create a clean directory for the output
+        mkdir -p release
         
-        # Copy configuration files so they are ready to use
-        cp full_config.yaml executables/config.yaml
-        cp categories.json executables/
-        cp geoip.txt executables/
+        # 2. Move the compiled binaries from the build folder (dist/) to release/
+        mv dist/vibe-dns-server${{ matrix.executable_ext }} release/
+        mv dist/geoip-compiler${{ matrix.executable_ext }} release/
+        
+        # 3. Copy essential configuration files
+        cp full_config.yaml release/config.yaml
+        cp categories.json release/
+        cp geoip.txt release/
 
-    - name: Upload Executables
+    # G. Upload Artifacts
+    - name: Upload Build Artifacts
       uses: actions/upload-artifact@v4
       with:
         name: vibe-dns-${{ matrix.platform_name }}
-        path: executables/
+        path: release/
 
