@@ -1,10 +1,5 @@
 # ==============================================================================
-# Vibe-DNS Automated Build & Release Pipeline (Stable Python 3.12)
-# ==============================================================================
-# This workflow compiles Python scripts into standalone executables for:
-#   - Linux (Generic glibc 2.28+ compatibility via Manylinux container)
-#   - Windows (x86_64)
-#   - macOS (Apple Silicon / ARM64)
+# Vibe-DNS Automated Build & Release Pipeline
 # ==============================================================================
 
 name: Build Vibe-DNS Binaries
@@ -23,19 +18,18 @@ jobs:
   build:
     name: Build for ${{ matrix.platform_name }}
     runs-on: ${{ matrix.os }}
-    # Only use a container if defined (for Linux)
     container: ${{ matrix.container_image }}
     
     strategy:
       fail-fast: false
       matrix:
         include:
-          # --- Linux (Generic / Manylinux) ---
-          # Built inside AlmaLinux 8 container (glibc 2.28)
-          # Compatible with Ubuntu 20.04+, Debian 10+, RHEL 8+
+          # --- Linux (Generic) ---
+          # FIX: Switched from manylinux (static python) to Debian 11 (shared python).
+          # Compatibility: Ubuntu 20.04+, Debian 11+, RHEL 9+.
           - os: ubuntu-latest
             platform_name: linux-amd64
-            container_image: quay.io/pypa/manylinux_2_28_x86_64
+            container_image: python:3.12-bullseye
             executable_ext: ""
 
           # --- Windows (x86_64) ---
@@ -54,16 +48,17 @@ jobs:
     - uses: actions/checkout@v4
 
     # 1. SETUP PYTHON (Linux Container)
-    # The manylinux image has pre-installed Python versions in /opt/python.
-    # We add Python 3.12 to the PATH manually.
-    - name: Setup Python 3.12 (Linux)
+    # Since we are already inside a Python container, we don't need to "install" it.
+    # We just explicitly ensure pip is up to date.
+    - name: Configure Python (Linux)
       if: matrix.platform_name == 'linux-amd64'
       run: |
-        echo "/opt/python/cp312-cp312/bin" >> $GITHUB_PATH
+        # Mark the workspace as safe for git (required inside containers)
+        git config --global --add safe.directory '*'
 
     # 2. SETUP PYTHON (Windows/Mac)
-    # Standard setup action for non-container jobs.
-    - name: Setup Python 3.12 (Windows/Mac)
+    # For standard runners, we use the official action.
+    - name: Setup Python (Windows/Mac)
       if: matrix.platform_name != 'linux-amd64'
       uses: actions/setup-python@v5
       with:
@@ -73,9 +68,6 @@ jobs:
     # 3. INSTALL DEPENDENCIES
     - name: Install Dependencies
       run: |
-        # Git safety fix for containers
-        git config --global --add safe.directory '*' || true
-        
         pip install --upgrade pip
         pip install -r requirements.txt
         pip install pyinstaller
