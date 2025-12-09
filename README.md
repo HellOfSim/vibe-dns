@@ -59,3 +59,4 @@ It can rewrite or minimize DNS responses: round-robin answers, TTL clamping, rem
 **Startup safety**
 It can check upstream health before going live, and fall back to bootstrap resolvers if needed.
 
+
