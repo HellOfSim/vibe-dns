@@ -1,58 +1,100 @@
-# vibe-dns (TESTING - USE AT OWN RISK)
+# VIBE-DNS
 
-My little filtering DNS server in Python vibed together using Google Gemini and Claude.
+**VIBE-DNS** is a high-performance, policy-driven filtering DNS server written in Python. It provides enterprise-grade control over DNS traffic with support for modern protocols (DoH/DoT), granular client identification, and advanced filtering logic.
 
-This was an excersise to see how things work. Not too bad actually...
+It is designed to be a "single source of truth" for network DNS, capable of handling complex routing and blocking scenarios.
 
-See `full_config.yaml` for more information.
+## 🚀 Key Features
 
-Run it with `python3 server.py --config <config-yaml-file>` (Python 3.14+).
+### 🛡️ Advanced Filtering Engine
+* **Multi-Layer Rules:** Block or allow based on **Domains** (exact/wildcard), **Regex**, **IP/CIDR** ranges, and **GeoIP** tags.
+* **Query & Answer Filtering:**
+    * Filter based on the domain being queried.
+    * Filter based on the **IP addresses returned** in the answer (e.g., block domains hosting malware on specific subnets).
+    * **CNAME Traversal:** Recursively checks CNAME targets against blocklists.
+* **Categorization:** Built-in engine to classify domains (e.g., *Gambling, Adult, Tracking*) with confidence scoring and configurable thresholds.
+* **Action Types:** `BLOCK` (Refused/NXDOMAIN/Sinkhole), `ALLOW` (Bypass), and `DROP` (Silent timeout).
 
-It's always DNS.
+### 🌍 GeoIP & Location Control
+* **High-Performance DB:** Uses a custom memory-mapped binary database for O(log n) lookups.
+* **Dual-Mode Blocking:**
+    * `@REGION`: Blocks based on the **TLD** of the query (e.g., `.cn`).
+    * `@@REGION`: Blocks based on the **IP location** of the resolved answer.
+* **Granularity:** Filter by Continent (e.g., `@@EUROPE`), Region (e.g., `@@EU_MEMBERS`), or Country (e.g., `@@US`).
 
+### ⚡ Upstream Management
+* **Protocols:** Supports **UDP**, **TCP**, **DoT** (DNS over TLS), and **DoH** (DNS over HTTPS/2).
+* **Strategies:**
+    * `fastest`: Probes latency and uses the quickest responder.
+    * `sticky`: Pins a client to a specific upstream for session consistency.
+    * `loadbalance`, `failover`, `random`, `roundrobin`.
+* **Resilience:** Integrated **Circuit Breaker** to temporarily stop querying failing upstreams and background health monitoring.
 
-=======
+### 🎯 Client Identification & Groups
+* Identify clients via:
+    * **Source IP / CIDR Subnet**
+    * **MAC Address** (via local ARP table or EDNS0 options).
+    * **Server Interface:** Identify based on which IP/Port the query arrived on (useful for VLANs).
+    * **GeoIP Tag:** Apply rules based on the client's physical location.
+* **Policies:** Map Groups to Policies. Policies define which blocklists, allowlists, and upstream servers are used.
+* **Schedules:** Apply time-based policies (e.g., stricter filtering during "Bedtime").
 
-# Features:
+### ⚡ Performance & Caching
+* **LRU Cache:** High-speed in-memory cache with **Optimistic Prefetching** (refreshes popular records before they expire).
+* **Request Deduplication:** Merges identical concurrent queries into a single upstream request to prevent thundering herds.
+* **Decision Cache:** Caches policy results (Block/Allow decisions) to bypass the rule engine for frequent queries.
 
-**Smart, policy-driven DNS filtering engine**
-The system lets you build tailored DNS behaviour for different users, devices, and networks. You can mix blocking, allow-listing, categorization, and upstream selection per group.
+### 🔧 Response Modification
+* **CNAME Flattening:** Can remove intermediate CNAME chains and return only the final A/AAAA record.
+* **TTL Normalization:** Enforce min/max TTLs or sync TTLs across records.
+* **Round Robin:** Randomize A/AAAA record order for client-side load balancing.
+* **Rate Limiting:** DoS protection with per-subnet request windows and automatic fallback to TCP (truncation) or dropping.
 
-**Client-aware filtering**
-It identifies clients by IP, subnet, or MAC (eithe local/native and/or viaa EDNS0), or on which ip-address and/or port their queries come in, so you can assign different rules to kids, guests, IoT gear, or whole LAN segments.
+## 🛠️ Installation & Usage
 
-**Time-based controls**
-Schedules allow policies to activate only during certain hours — like “bedtime”, “school hours”, or work-time restrictions — and automatically return to normal afterwards.
+**Requirements:** Python 3.14+ (Recommended) and dependencies listed in `requirements.txt`.
 
-**Domain categorization**
-A built-in categorization layer can classify domains (ads, adult, social media, gambling, etc.) with confidence scoring. Policies can block categories selectively, per client group.
+### 1. Setup Environment
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+````
 
-**Flexible policy engine**
-Policies decide what to do with a query:
+### 2\. Compile GeoIP Database
 
-* Block, filter, sinkhole, or allow
-* Use specific upstream resolvers
-* Enforce TTL rules
-* Rewrite or collapse CNAMEs
-* Strip unwanted metadata
+Vibe-DNS uses a custom binary format. You must compile it from MaxMind or JSON sources before enabling GeoIP.
 
-Everything is composable, so groups can inherit schedules + policies cleanly.
+```bash
+# Example using a downloaded JSON source
+python3 geoip_compiler.py --json ipinfo_lite.json --unified-output geoip.vibe
+```
 
-**Multiple blocklist sources**
-It can pull lists from remote or local sources (hosts files, custom lists, category lists). These combine with the policy engine to determine the final behaviour.
+### 3\. Configuration
 
-**Upstream resolver intelligence**
-Supports multiple resolver groups with balancing, failover, and health checks. It can probe latency, choose the fastest path, or stick to a group depending on your strategy.
+Copy `full_config.yaml` to `config.yaml` and edit to suit your network.
 
-**Caching with prefetch**
-There’s an internal response cache, including stale-serve and prefetch logic to keep latency low and reduce upstream load. Entries close to expiry can be refreshed proactively.
+  * Define **Lists** (local files or remote URLs).
+  * Define **Groups** (your clients).
+  * Define **Policies** (combining lists and upstreams).
+  * Assign Groups to Policies.
 
-**Rate-limiting & abuse protection**
-The server can identify abusive clients or subnets, slow them down, or drop excess traffic — useful for noisy IoT or small DoS-style bursts.
+### 4\. Run Server
 
-**Response shaping**
-It can rewrite or minimize DNS responses: round-robin answers, TTL clamping, removing extra sections, collapsing chains — handy for privacy, consistency or load-balancing.
+```bash
+python3 server.py --config config.yaml
+```
 
-**Startup safety**
-It can check upstream health before going live, and fall back to bootstrap resolvers if needed.
+## 📂 Project Structure
 
+  * `server.py`: Main entry point, handles UDP/TCP listeners and concurrency.
+  * `resolver.py`: Core logic for query processing, caching, and policy enforcement.
+  * `filtering.py`: Rule matching engine (Trie/Regex/IntervalTree).
+  * `upstream_manager.py`: Handles upstream connections (DoH/DoT/UDP) and load balancing.
+  * `geoip.py` & `geoip_compiler.py`: Runtime lookup and database compilation tools.
+  * `list_manager.py`: Fetches and parses blocklists/allowlists.
+  * `config_validator.py`: Ensures configuration integrity at startup.
+
+## ⚠️ Disclaimer
+
+This is a testing project. Use at your own risk. While designed for performance and security, it is not an official enterprise product.
