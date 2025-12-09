@@ -1,0 +1,64 @@
+name: Build Vibe-DNS Binaries
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+
+jobs:
+  build:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform_name: linux-amd64
+            executable_ext: ""
+          - os: windows-latest
+            platform_name: windows-amd64
+            executable_ext: ".exe"
+          - os: macos-14  # Uses Apple Silicon (M1) runners
+            platform_name: macos-arm64
+            executable_ext: ""
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12' # Recommended over 3.14 for compatibility
+        cache: 'pip'
+
+    - name: Install Dependencies
+      run: |
+        pip install -r requirements.txt
+        pip install pyinstaller
+
+    - name: Build Server
+      run: |
+        pyinstaller --clean --onefile --name vibe-dns-server${{ matrix.executable_ext }} server.py
+
+    - name: Build GeoIP Compiler
+      run: |
+        pyinstaller --clean --onefile --name geoip-compiler${{ matrix.executable_ext }} geoip_compiler.py
+
+    - name: Prepare Artifacts
+      shell: bash
+      run: |
+        mkdir release
+        mv dist/vibe-dns-server${{ matrix.executable_ext }} release/
+        mv dist/geoip-compiler${{ matrix.executable_ext }} release/
+        # Copy config files so the user has them next to the binary
+        cp full_config.yaml release/config.yaml
+        cp categories.json release/
+        cp geoip.txt release/
+
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: vibe-dns-${{ matrix.platform_name }}
+        path: release/
+
