@@ -137,6 +137,9 @@ REGION_DEFINITIONS = {
     'CENTRAL_EUROPE': {
         'countries': ['AT', 'CZ', 'DE', 'HU', 'LI', 'PL', 'SK', 'SI', 'CH']
     },
+    'CHINA': {
+        'countries': ['CN', 'HK', 'MO','TW']
+    },
     'DENAKIL': {
         'countries': ['ER', 'ET', 'DJ']
     },
