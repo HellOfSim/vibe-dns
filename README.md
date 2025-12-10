@@ -19,7 +19,7 @@ It's always DNS.
 The system lets you build tailored DNS behaviour for different users, devices, and networks. You can mix blocking, allow-listing, categorization, and upstream selection per group.
 
 **Client-aware filtering**
-It identifies clients by IP, subnet, or MAC (eithe local/native and/or viaa EDNS0), or on which ip-address and/or port their queries come in, so you can assign different rules to kids, guests, IoT gear, or whole LAN segments.
+It identifies clients by IP, subnet, or MAC (either local/native and/or via EDNS0), or on which ip-address and/or port their queries come in, so you can assign different rules to kids, guests, IoT gear, or whole LAN segments.
 
 **Time-based controls**
 Schedules allow policies to activate only during certain hours — like “bedtime”, “school hours”, or work-time restrictions — and automatically return to normal afterwards.
