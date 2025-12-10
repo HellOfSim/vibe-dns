@@ -136,6 +136,11 @@ Rule (Both):  @@CENTRAL_EUROPE
 Rule (Query): @CENTRAL_EUROPE
 Countries:    AT, CH, CZ, DE, HU, LI, PL, SI, SK
 ----------------------------------------
+Region:       CHINA
+Rule (Both):  @@CHINA
+Rule (Query): @CHINA
+Countries:    CN, HK, MO, TW
+----------------------------------------
 Region:       DENAKIL
 Rule (Both):  @@DENAKIL
 Rule (Query): @DENAKIL
@@ -276,6 +281,11 @@ Region:       POLYNESIA
 Rule (Both):  @@POLYNESIA
 Rule (Query): @POLYNESIA
 Countries:    AS, CK, NU, PF, PN, TO, TV, WF, WS
+----------------------------------------
+Region:       RUSSIA
+Rule (Both):  @@RUSSIA
+Rule (Query): @RUSSIA
+Countries:    AM, AZ, BY, EE, GE, KG, KZ, LT, LV, MD, RU, SU, TJ, TM, UA, UZ
 ----------------------------------------
 Region:       SAHEL
 Rule (Both):  @@SAHEL
