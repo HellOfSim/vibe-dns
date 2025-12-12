@@ -127,13 +127,22 @@ class DomainCategorizer:
                         break
         
             if 'keywords' in data:
+                substring_matches = []
                 for kw in data['keywords']:
                     if kw in parts:
                         score = max(score, 95)
                         score_details.append(f"Exact keyword '{kw}' in label → 95")
                     elif kw in domain_norm:
-                        score = max(score, 70)
-                        score_details.append(f"Keyword '{kw}' substring → 70")
+                        substring_matches.append(kw)
+                
+                # Stack substring matches: base 70 + 10 per additional, capped at 90
+                if substring_matches:
+                    substring_score = min(70 + (len(substring_matches) - 1) * 10, 90)
+                    if substring_score > score:
+                        score = substring_score
+                    score_details.append(
+                        f"Keyword substrings [{', '.join(substring_matches)}] → {substring_score}"
+                    )
         
             if score > 0:
                 results[category] = score
@@ -148,7 +157,7 @@ class DomainCategorizer:
             logger.debug(f"  No categories matched for domain: {domain_norm}")
     
         return results
-
+        
 class RuleEngine:
     def __init__(self):
         # Consolidated structures
