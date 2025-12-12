@@ -144,15 +144,17 @@ upstream:
   groups:
     Default:
       servers:
-        - "udp://8.8.8.8:53"
-        - "udp://1.1.1.1:53"
+        - url: "udp://8.8.8.8:53"
+          priority: 10
+        - url: "udp://1.1.1.1:53"
+          priority: 20
     
     Secure:
       servers:
         # DoT Example (Forced IP prevents bootstrap lookup)
-        - "tls://1.1.1.1:853#1.1.1.1"
+        - url: "tls://1.1.1.1:853#1.1.1.1"
         # DoH Example
-        - "https://dns.google:443/dns-query#8.8.4.4"
+        - url: "https://dns.google:443/dns-query#8.8.4.4"
 
 # =============================================================================
 # 5. CACHING
