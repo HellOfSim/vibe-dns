@@ -13,6 +13,7 @@ import regex
 import ipaddress
 import orjson as json
 import dns.rdatatype
+import logging
 from collections import defaultdict
 from utils import get_logger
 from validation import is_valid_domain

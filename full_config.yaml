@@ -1,6 +1,6 @@
 # =============================================================================
 # VIBE-DNS COMPLETE REFERENCE CONFIGURATION
-# Generated based on codebase v6.9.x
+# Based on codebase v9.0.0+ (ASN, GeoIP, and Policy Engine updates)
 # =============================================================================
 
 # =============================================================================
@@ -14,7 +14,7 @@ logging:
   # Print logs to stdout (terminal)
   enable_console: true
   
-  # Include timestamp in console logs (systemd/docker usually handle this, so false is common)
+  # Include timestamp in console logs (set false if using systemd/docker)
   console_timestamp: true
   
   # Write logs to a file
@@ -23,7 +23,7 @@ logging:
   
   # Send logs to local Syslog or remote Syslog server
   enable_syslog: false
-  # Can be a file path (e.g., /dev/log) or "host:port"
+  # Can be a file path (e.g., /dev/log) or "host:port" (e.g., 192.168.1.50:514)
   syslog_address: "/dev/log"
   # Protocol if sending over network: UDP or TCP
   syslog_protocol: "UDP"
@@ -34,16 +34,20 @@ logging:
 # =============================================================================
 server:
   # List of IPs to listen on. Use "0.0.0.0" for all IPv4, "::" for all IPv6.
-  # If empty, defaults to all interfaces.
+  # If empty, it defaults to all interfaces.
   bind_ip: 
     - "0.0.0.0"
     - "::"
   
-  # Alternatively, specify interface names (e.g., eth0, lo, wlan0).
+  # OPTIONAL: Bind by interface name instead of IP. 
   # The server will resolve these to IPs at startup.
-  # bind_interfaces: []
+  # Note: bind_ip takes precedence if both are set, or they can be mixed.
+  # bind_interfaces: 
+  #   - "eth0"
+  #   - "wg0"
   
   # Ports to listen on (List of integers)
+  # Port 53 requires root privileges.
   port_udp: [53]
   port_tcp: [53]
   
@@ -52,8 +56,8 @@ server:
   use_ecs: true
   
   # How to handle ECS when forwarding to upstream:
-  # - none:     Strip ECS data (Privacy)
-  # - preserve: Forward client's ECS data if present
+  # - none:     Strip ECS data (Privacy / Default)
+  # - preserve: Forward client's provided ECS data if present
   # - add:      Inject the client's actual IP as ECS data
   forward_ecs_mode: "none"
 
@@ -62,7 +66,7 @@ server:
   use_edns_mac: true
   
   # How to handle MAC forwarding to upstream (custom option 65001):
-  # - none:     Do not send MAC to upstream
+  # - none:     Do not send MAC to upstream (Default)
   # - preserve: Forward existing MAC option if present
   # - add:      Resolve client MAC from ARP/Neighbor table and inject it
   forward_mac_mode: "none"
@@ -73,18 +77,15 @@ server:
 # =============================================================================
 geoip:
   # Master switch for GeoIP functionality
-  enabled: false
+  enabled: true
   
   # Path to the binary database compiled via geoip_compiler.py (Recommended)
   unified_database: "./geoip.vibe"
   
-  # Fallback: Path to raw MaxMind MMDB file (if unified DB is missing)
-  # database_path: "./GeoLite2-Country.mmdb"
-  
-  # logic for mapping Domain TLDs to Countries (e.g. .fr -> France)
-  # - geoip_only:  Ignore TLDs. Only use IP-based lookup. (Most secure/accurate)
-  # - cctld_first: If domain TLD matches a blocked location, block immediately. Else check IP.
-  # - cctld_geoip: Require BOTH the TLD and the IP to match the location.
+  # Logic for mapping Domain TLDs to Countries (e.g. .fr -> France)
+  # - geoip_only:  Ignore TLDs. Only use IP-based lookup. (Most accurate)
+  # - cctld_first: If domain TLD matches a blocked location, block immediately.
+  # - cctld_geoip: Use TLD as a hint to disambiguate IP location.
   cctld_mode: "geoip_only"
 
 # =============================================================================
@@ -114,7 +115,7 @@ upstream:
   # Seconds between latency probes
   monitor_interval: 60
   
-  # Trigger background latency check if a user queries a domain
+  # Trigger background latency check immediately if a user queries a domain
   monitor_on_query: true
   
   # Domain used for latency probing
@@ -123,15 +124,17 @@ upstream:
   # Max concurrent connections per HTTP/2 client (for DoH upstreams)
   connection_limit: 20
   
-  # Circuit Breaker (Prevents hammering dead upstreams)
+  # --- Circuit Breaker ---
+  # Temporarily stops sending queries to a dead upstream
   circuit_breaker_enabled: true
   circuit_failure_threshold: 3   # Number of failures before opening circuit
-  circuit_recovery_timeout: 30   # Seconds to wait before retrying
+  circuit_recovery_timeout: 30   # Seconds to wait before retrying a dead server
 
-  # Bootstrap DNS servers (Used to resolve hostnames of DoH/DoT upstreams)
+  # Bootstrap DNS servers 
+  # Used to resolve hostnames of DoH/DoT upstreams (e.g. resolving dns.google)
   bootstrap:
     - "8.8.8.8"
-    - "8.8.4.4"
+    - "1.1.1.1"
 
   # Upstream Server Definitions
   # Syntax: protocol://host:port/path#forced_ip
@@ -144,7 +147,9 @@ upstream:
     
     Secure:
       servers:
+        # DoT Example (Forced IP prevents bootstrap lookup)
         - "tls://1.1.1.1:853#1.1.1.1"
+        # DoH Example
         - "https://dns.google:443/dns-query#8.8.4.4"
 
 # =============================================================================
@@ -158,7 +163,7 @@ cache:
   # Garbage collection interval (seconds)
   gc_interval: 300
   
-  # Cache TTL for failures/NXDOMAIN (if upstream doesn't provide one)
+  # Cache TTL for upstream failures/NXDOMAIN (if upstream doesn't provide one)
   negative_ttl: 60
   
   # Optimistic Prefetching
@@ -170,13 +175,14 @@ cache:
   prefetch_min_hits: 3
 
 # Cache for Policy Decisions (e.g., "google.com is BLOCKED for group X")
-# Significantly speeds up repeated queries for filtered domains.
+# Significantly speeds up repeated queries for filtered domains/categories.
 decision_cache:
   size: 50000
   ttl: 300
 
 deduplication:
   # Merge identical concurrent requests into one upstream query
+  # Prevents "thundering herd" if multiple clients request same domain instantly.
   enabled: true
 
 # =============================================================================
@@ -194,11 +200,11 @@ rate_limit:
   ipv4_mask: 32
   ipv6_mask: 128
   
-  # Max UDP queries per window before forcing fallback to TCP (Truncation)
+  # Max UDP queries per window before forcing fallback to TCP (TC Flag set)
   # This mitigates DNS amplification attacks.
   udp_threshold: 100
   
-  # Total queries (UDP+TCP) per window before dropping packets
+  # Total queries (UDP+TCP) per window before completely dropping packets
   total_threshold: 200
 
 # =============================================================================
@@ -206,11 +212,11 @@ rate_limit:
 # How the server constructs answers.
 # =============================================================================
 response:
-  # Randomize order of A/AAAA records (Load balancing for client)
+  # Randomize order of A/AAAA records (Simple Load balancing for client)
   round_robin_enabled: false
   
   # Recursively resolve CNAMEs and remove the intermediate chain from the answer.
-  # Returns only the final IP record to the client.
+  # Returns only the final IP record to the client (CNAME Flattening).
   cname_collapse: true
   
   # RCODE to return if CNAME collapse results in empty answer: NXDOMAIN or NOERROR
@@ -222,7 +228,7 @@ response:
   # --- TTL Normalization ---
   min_ttl: 0
   max_ttl: 86400
-  # Sync TTLs across all records in an answer:
+  # Sync TTLs across all records in an answer. Options:
   # none, first, last, lowest, highest, average
   ttl_sync_mode: "none"
   
@@ -234,15 +240,15 @@ response:
   block_ttl: 60
   
   # If specified, return this IP instead of RCODE for A/AAAA blocks (Sinkholing).
-  # Use "NULL" for 0.0.0.0 / ::
+  # Use "NULL" for 0.0.0.0 (IPv4) / :: (IPv6)
   block_ip: "NULL"
   
-  # How to handle responses containing blocked IPs:
+  # How to handle responses containing blocked IPs (e.g. from GeoIP or Lists):
   # - filter: Remove only the blocked IPs from the answer. Return rest.
   # - block:  Block the *entire* response if it contains any blocked IP.
   ip_block_mode: "filter"
   
-  # Apply blocklists to IPs found inside the answer section (recursively check answers)
+  # Apply blocklists/GeoIP rules to IPs found inside the answer section recursively
   match_answers_globally: false
 
 # =============================================================================
@@ -254,9 +260,9 @@ categories_file: "categories.json"
 
 # =============================================================================
 # 9. CLIENT GROUPS
-# mapping clients to identifiers.
+# Mapping clients to identifiers.
 # =============================================================================
-# How often to refresh ARP/Neigh tables for MAC resolution
+# How often to refresh ARP/Neigh tables for MAC resolution (Seconds)
 mac_cache_refresh_interval: 300
 
 # Group definitions
@@ -266,17 +272,24 @@ mac_cache_refresh_interval: 300
 # - MAC Address (aa:bb:cc:dd:ee:ff)
 # - GeoIP Tag (geoip:US, geoip:EUROPE)
 # - Server Bind IP (server_ip:10.0.0.1) - useful for VLAN gateways
-# - Server Port (server_port:5353)
+# - Server Port (server_port:5353) - useful for specific listeners
 groups:
   admin_devices:
     - "10.0.0.5"
     - "AA:BB:CC:DD:EE:FF"
   
   iot_vlan:
+    # OPTIONAL: Set a default action for this group (ALLOW, BLOCK, DROP)
+    # If set, this overrides policies for unhandled domains.
+    - { default_action: "ALLOW" }
     - "10.0.50.0/24"
+    - "server_ip:10.0.50.1"
   
   kids:
     - "10.0.0.10"
+    
+  vpn_users:
+    - "server_ip:10.8.0.1"
 
 # Load groups from external text files (one identifier per line)
 # These files are auto-reloaded based on refresh_interval.
@@ -315,13 +328,17 @@ lists:
     - source: "./lists/whitelist.txt"
       hosts_domain_type: "exact"
       
-  # GeoIP blocking list (contains rules like @@CN, @@RUSSIA)
+  # GeoIP blocking list (uses tags like @@CN, @@RUSSIA, @AS15169)
+  # Syntax: 
+  #   @@TAG = Block Query (ccTLD) AND Answer (IP)
+  #   @TAG  = Block Query (ccTLD) only
+  #   @AS#  = Block Answer (ASN)
   geo_block:
     - source: "./lists/geo.txt"
 
 # =============================================================================
 # 12. POLICIES
-# logic combining Upstreams, Lists, and Actions.
+# Logic combining Upstreams, Lists, and Actions.
 # =============================================================================
 policies:
   # Default policy if no group matches
@@ -364,8 +381,8 @@ assignments:
   kids:
     policy: "KidsPolicy"
     schedule: "bedtime"
-    # Policy to apply when schedule is ACTIVE
-    schedule_policy: "BLOCK"  # Built-in policy that blocks everything
+    # Policy to apply when schedule is ACTIVE (Built-in policies: BLOCK, ALLOW, DROP)
+    schedule_policy: "BLOCK" 
     
   iot_vlan:
     policy: "Default"
