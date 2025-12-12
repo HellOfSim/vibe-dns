@@ -2,18 +2,16 @@
 # filename: upstream_manager.py
 # -----------------------------------------------------------------------------
 # Project: Filtering DNS Server (Refactored)
-# Version: 6.3.0 (Critical Fixes)
+# Version: 6.4.0 (Priority Support)
 # -----------------------------------------------------------------------------
 """
-Upstream DNS Server Manager - Fixed Version
+Upstream DNS Server Manager with Priority Support
 
-Fixes in 6.3.0:
-- Fixed snapshot_stats race condition in load balancing
-- Fixed monitoring lock race condition
-- Fixed DoH client initialization for mode='none'
-- Fixed circuit breaker state drift during server expansion
-- Fixed sticky map memory leak with periodic cleanup
-- Optimized stats lock contention
+Changes in 6.4.0:
+- Added per-server priority configuration
+- Servers sorted by (priority, latency) tuple
+- Backwards compatible: string format defaults to priority 100
+- New dict format: {url: "...", priority: N}
 """
 
 import asyncio
@@ -256,42 +254,29 @@ class UpstreamManager:
                     clean_host = clean_host[1:-1]
 
                 if not self._is_valid_ip(clean_host):
-                    logger.warning(f"Bootstrap server must be an IP address, got '{clean_host}'")
+                    logger.warning(f"Bootstrap must be IP address, not hostname: '{entry}'")
                     continue
 
-                if port is None: 
-                    port = valid_protos[proto]
-                elif not self._is_valid_port(port):
-                    logger.warning(f"Invalid port {port} for bootstrap server, using default")
+                if port is None:
                     port = valid_protos[proto]
 
                 self.bootstrappers.append({
                     'proto': proto,
                     'ip': clean_host,
-                    'port': port,
-                    'id': f"{proto}://{clean_host}:{port}"
+                    'port': port
                 })
-                logger.debug(f"Bootstrap server added: {proto}://{clean_host}:{port}")
-            except Exception as e: 
+                logger.debug(f"Bootstrap server: {proto}://{clean_host}:{port}")
+            except Exception as e:
                 logger.warning(f"Failed to parse bootstrap entry '{entry}': {e}")
 
         if not self.bootstrappers:
-            logger.warning("No valid bootstrap servers, using defaults")
-            self.bootstrappers = [
-                {'proto': 'udp', 'ip': '86.54.11.1', 'port': 53, 'id': 'udp://86.54.11.1:53'},
-                {'proto': 'udp', 'ip': '9.9.9.9', 'port': 53, 'id': 'udp://9.9.9.9:53'},
-                {'proto': 'udp', 'ip': '1.1.1.2', 'port': 53, 'id': 'udp://1.1.1.2:53'},
-                {'proto': 'udp', 'ip': '8.8.8.8', 'port': 53, 'id': 'udp://8.8.8.8:53'}
-            ]
+            logger.warning("No valid bootstrap servers, using fallback")
+            for ip in ['8.8.8.8', '1.1.1.1']:
+                self.bootstrappers.append({'proto': 'udp', 'ip': ip, 'port': 53})
 
     async def _bootstrap_resolve(self, hostname):
-        try:
-            ipaddress.ip_address(hostname)
-            return [hostname]
-        except ValueError: 
-            pass
-            
         found_ips = set()
+        
         for qtype in [dns.rdatatype.A, dns.rdatatype.AAAA]:
             q = dns.message.make_query(hostname, qtype)
             pkt = q.to_wire()
@@ -340,7 +325,19 @@ class UpstreamManager:
             if not isinstance(s_list, list): 
                 continue
 
-            for s_str in s_list:
+            for s_item in s_list:
+                # Handle both string and dict formats for priority support
+                if isinstance(s_item, dict):
+                    s_str = s_item.get('url', '')
+                    priority = s_item.get('priority', 100)
+                else:
+                    s_str = s_item
+                    priority = 100
+                
+                if not s_str:
+                    logger.warning(f"Empty server URL in group '{group_name}', skipping")
+                    continue
+                
                 forced_ip = None
                 if '#' in s_str:
                     s_str, candidate_ip = s_str.rsplit('#', 1)
@@ -403,7 +400,8 @@ class UpstreamManager:
                     'port': port, 
                     'path': path, 
                     'latency': float('inf'),
-                    'group': group_name
+                    'group': group_name,
+                    'priority': priority
                 }
                 self.servers.append(server_entry)
                 self.lb_stats[server_id] = {'history': [], 'avg': float('inf'), 'last_used': 0}
@@ -421,7 +419,7 @@ class UpstreamManager:
                 else:
                     display_name = f"{proto.upper()}://{host}:{port}"
                 
-                logger.debug(f"Parsed: {display_name} (IP: {forced_ip or 'resolve later'}) in group '{group_name}'")
+                logger.debug(f"Parsed: {display_name} (IP: {forced_ip or 'resolve later'}, Pri: {priority}) in group '{group_name}'")
         
         logger.info(f"Configuration Loaded: {count} upstream servers parsed.")
 
@@ -516,7 +514,8 @@ class UpstreamManager:
                         'port': 53, 
                         'path': '', 
                         'latency': float('inf'), 
-                        'group': 'Default'
+                        'group': 'Default',
+                        'priority': 100
                      })
                      if self.circuit_breaker_enabled:
                          self.circuit_breakers[fallback_id] = CircuitBreaker(
@@ -625,16 +624,17 @@ class UpstreamManager:
             
             async with self._servers_lock:
                 before_top3 = [
-                    (s['id'], s['proto'].upper(), s['latency'], snapshot_stats.get(s['id'], float('inf')))
+                    (s['id'], s['proto'].upper(), s['latency'], snapshot_stats.get(s['id'], float('inf')), s.get('priority', 100))
                     for s in self.servers[:3]
                 ]
                 
+                # Sort by (priority, latency) for fastest/failover modes
                 if self.mode in ['fastest', 'failover']:
-                    self.servers.sort(key=lambda x: x['latency'])
-                    logger.debug(f"Servers sorted by current latency (mode: {self.mode})")
+                    self.servers.sort(key=lambda x: (x.get('priority', 100), x['latency']))
+                    logger.debug(f"Servers sorted by priority+latency (mode: {self.mode})")
                 elif self.mode == 'loadbalance': 
-                    self.servers.sort(key=lambda x: snapshot_stats.get(x['id'], 999.0))
-                    logger.debug(f"Servers sorted by average latency (mode: {self.mode})")
+                    self.servers.sort(key=lambda x: (x.get('priority', 100), snapshot_stats.get(x['id'], 999.0)))
+                    logger.debug(f"Servers sorted by priority+avg latency (mode: {self.mode})")
                 elif self.mode == 'sticky':
                     logger.debug(f"Server order maintained (mode: {self.mode})")
                 elif self.mode in ['random', 'roundrobin']:
@@ -643,7 +643,7 @@ class UpstreamManager:
                     logger.warning(f"Unknown monitoring mode: {self.mode}")
                 
                 after_top3 = [
-                    (s['id'], s['proto'].upper(), s['latency'], snapshot_stats.get(s['id'], float('inf')))
+                    (s['id'], s['proto'].upper(), s['latency'], snapshot_stats.get(s['id'], float('inf')), s.get('priority', 100))
                     for s in self.servers[:3]
                 ]
                 
@@ -655,10 +655,10 @@ class UpstreamManager:
                     logger.info("=" * 80)
                     
                     logger.info("Previously selected (top 3):")
-                    for i, (sid, proto, cur_lat, avg_lat) in enumerate(before_top3, 1):
+                    for i, (sid, proto, cur_lat, avg_lat, pri) in enumerate(before_top3, 1):
                         cur_str = f"{cur_lat*1000:.1f}ms" if cur_lat < 900.0 else "UNTESTED"
                         avg_str = f"{avg_lat*1000:.1f}ms" if avg_lat < 900.0 else "UNTESTED"
-                        logger.info(f"  #{i}: [{proto:6s}] {sid:50s} | Cur: {cur_str:9s} | Avg: {avg_str:9s}")
+                        logger.info(f"  #{i}: [{proto:6s}] {sid:50s} | Pri: {pri:3d} | Cur: {cur_str:9s} | Avg: {avg_str:9s}")
                     
                     logger.info("-" * 80)
                     logger.info(f"All servers sorted by {self.mode} criteria:")
@@ -668,6 +668,7 @@ class UpstreamManager:
                         sid = s['id']
                         cur_lat = s['latency']
                         avg_lat = snapshot_stats.get(sid, float('inf'))
+                        pri = s.get('priority', 100)
                         
                         cur_str = f"{cur_lat*1000:.1f}ms" if cur_lat < 900.0 else "UNTESTED"
                         avg_str = f"{avg_lat*1000:.1f}ms" if avg_lat < 900.0 else "UNTESTED"
@@ -676,7 +677,7 @@ class UpstreamManager:
                         
                         logger.info(
                             f"  {marker} #{i:2d}: [{proto:6s}] {sid:50s} | "
-                            f"Cur: {cur_str:9s} | Avg: {avg_str:9s}"
+                            f"Pri: {pri:3d} | Cur: {cur_str:9s} | Avg: {avg_str:9s}"
                         )
                     
                     logger.info("=" * 80)
@@ -699,9 +700,9 @@ class UpstreamManager:
             for proto, stats in sorted(proto_summary.items()):
                 if stats['avg_latency']:
                     avg = sum(stats['avg_latency']) / len(stats['avg_latency'])
-                    logger.info(f"  {proto}: {stats['working']}/{stats['count']} working (avg: {avg*1000:.1f}ms)")
+                    logger.info(f"  - {proto}: {stats['working']}/{stats['count']} working (avg: {avg*1000:.1f}ms)")
                 else:
-                    logger.info(f"  {proto}: {stats['working']}/{stats['count']} working (all untested/failed)")
+                    logger.info(f"  - {proto}: {stats['working']}/{stats['count']} working (all untested/failed)")
             
             if self.circuit_breaker_enabled:
                 open_breakers = [sid for sid, cb in self.circuit_breakers.items() if cb.state == 'OPEN']
@@ -755,6 +756,8 @@ class UpstreamManager:
                 
                 current = f"{s['latency']*1000:.1f}ms" if s['latency'] < 900.0 else "UNTESTED"
                 
+                pri = s.get('priority', 100)
+                
                 cb_state = ""
                 if self.circuit_breaker_enabled and s['id'] in self.circuit_breakers:
                     cb = self.circuit_breakers[s['id']]
@@ -763,7 +766,7 @@ class UpstreamManager:
                 
                 logger.info(
                     f"  #{i:2d}: [{proto:6s}] {display:<{max_disp}s} ({s['ip']:<{max_ip}s}) | "
-                    f"Cur: {current:9s} | Avg: {avg_lat:9s}{cb_state}"
+                    f"Pri: {pri:3d} | Cur: {current:9s} | Avg: {avg_lat:9s}{cb_state}"
                 )
 
     async def _measure_latency(self, server):
@@ -874,16 +877,16 @@ class UpstreamManager:
                 for s in candidates:
                     snapshot_stats[s['id']] = self.lb_stats.get(s['id'], {}).get('avg', float('inf'))
             
-            # Sort based on current mode
+            # Sort based on current mode (priority is primary key)
             if self.mode == 'fastest':
-                candidates.sort(key=lambda x: x['latency'])
-                log.debug(f"Sorted {len(candidates)} servers by current latency (fastest mode)")
+                candidates.sort(key=lambda x: (x.get('priority', 100), x['latency']))
+                log.debug(f"Sorted {len(candidates)} servers by priority+latency (fastest mode)")
             elif self.mode == 'loadbalance':
-                candidates.sort(key=lambda x: snapshot_stats.get(x['id'], 999.0))
-                log.debug(f"Sorted {len(candidates)} servers by average latency (loadbalance mode)")
+                candidates.sort(key=lambda x: (x.get('priority', 100), snapshot_stats.get(x['id'], 999.0)))
+                log.debug(f"Sorted {len(candidates)} servers by priority+avg latency (loadbalance mode)")
             elif self.mode == 'failover':
-                candidates.sort(key=lambda x: x['latency'])
-                log.debug(f"Sorted {len(candidates)} servers by current latency (failover mode)")
+                candidates.sort(key=lambda x: (x.get('priority', 100), x['latency']))
+                log.debug(f"Sorted {len(candidates)} servers by priority+latency (failover mode)")
         
         if self.circuit_breaker_enabled:
             candidates = [
@@ -952,9 +955,9 @@ class UpstreamManager:
         for s in selected:
             proto_name = s['proto'].upper()
             if s['proto'] == 'https':
-                log.debug(f"  - {s['host']}:{s['port']}{s['path']} ({s['ip']}) via {proto_name}")
+                log.debug(f"  - {s['host']}:{s['port']}{s['path']} ({s['ip']}) via {proto_name} [pri:{s.get('priority', 100)}]")
             else:
-                log.debug(f"  - {s['host']} ({s['ip']}) via {proto_name}:{s['port']}")
+                log.debug(f"  - {s['host']} ({s['ip']}) via {proto_name}:{s['port']} [pri:{s.get('priority', 100)}]")
 
         for server in selected:
             try:
@@ -1087,4 +1090,3 @@ class UpstreamManager:
         except Exception as e:
             logger.error(f"DoH setup error: {e}")
             return None
-
