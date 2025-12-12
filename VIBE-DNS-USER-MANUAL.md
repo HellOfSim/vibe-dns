@@ -69,7 +69,7 @@ pip install -r requirements.txt
 
 ### Pre-built Binaries
 
-Download pre-built binaries from the [Releases](https://github.com/your-repo/vibe-dns/releases) page:
+Download pre-built binaries from the [Releases](https://github.com/cbuijs/vibe-dns/releases) page:
 
 - `vibe-dns-server-linux-amd64`
 - `vibe-dns-server-macos-arm64`
