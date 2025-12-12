@@ -30,17 +30,17 @@ class ConfigValidator:
     def validate(self, config: Dict[str, Any]) -> Tuple[bool, List[str], List[str]]:
         """
         Validate entire configuration.
-        
+    
         Returns:
             (is_valid, errors, warnings)
         """
         self.errors = []
         self.warnings = []
-        
+    
         if not isinstance(config, dict):
             self.errors.append("Configuration must be a dictionary")
             return False, self.errors, self.warnings
-        
+    
         # Validate each section
         self._validate_server(config.get('server', {}))
         self._validate_upstream(config.get('upstream', {}))
@@ -52,19 +52,30 @@ class ConfigValidator:
         self._validate_assignments(config.get('assignments', {}), config.get('policies', {}), config.get('schedules', {}))
         self._validate_policies(config.get('policies', {}), config.get('lists', {}))
         self._validate_lists(config.get('lists', {}))
-        
+    
         is_valid = len(self.errors) == 0
-        
+    
+        # ALWAYS print errors and warnings to stdout
+        if self.errors:
+            print("\n❌ CONFIGURATION ERRORS:")
+            for i, err in enumerate(self.errors, 1):
+                print(f"  {i}. {err}")
+    
+        if self.warnings:
+            print("\n⚠️  CONFIGURATION WARNINGS:")
+            for i, warn in enumerate(self.warnings, 1):
+                print(f"  {i}. {warn}")
+    
         if is_valid:
             logger.info("Configuration validation PASSED")
         else:
             logger.error(f"Configuration validation FAILED with {len(self.errors)} error(s)")
-        
+    
         if self.warnings:
             logger.warning(f"Configuration has {len(self.warnings)} warning(s)")
-        
-        return is_valid, self.errors, self.warnings
     
+        return is_valid, self.errors, self.warnings
+
     def _validate_server(self, server_cfg: Dict[str, Any]):
         """Validate server networking configuration"""
         if not isinstance(server_cfg, dict):
@@ -392,33 +403,36 @@ class ConfigValidator:
                     if time_val:
                         if not isinstance(time_val, str) or not time_pattern.match(time_val):
                             self.errors.append(f"schedules.{schedule_name}: Invalid {time_key} time '{time_val}', must be HH:MM format")
-    
+
     def _validate_assignments(self, assignments_cfg: Dict[str, Any], policies_cfg: Dict[str, Any], schedules_cfg: Dict[str, Any]):
         """Validate policy assignments"""
         if not isinstance(assignments_cfg, dict):
             self.errors.append("assignments: Must be a dictionary")
             return
-        
+    
+        # Built-in policies that don't need to be in policies_cfg
+        builtin_policies = {'BLOCK', 'ALLOW', 'DROP'}
+    
         for group_name, assignment in assignments_cfg.items():
             if not isinstance(assignment, dict):
                 self.errors.append(f"assignments.{group_name}: Must be a dictionary")
                 continue
-            
+        
             # Check policy exists
             policy_name = assignment.get('policy')
             if policy_name:
-                if policy_name != 'BLOCK' and policy_name not in policies_cfg:
+                if policy_name not in builtin_policies and policy_name not in policies_cfg:
                     self.errors.append(f"assignments.{group_name}: References non-existent policy '{policy_name}'")
-            
+        
             # Check schedule exists
             schedule_name = assignment.get('schedule')
             if schedule_name and schedule_name not in schedules_cfg:
                 self.errors.append(f"assignments.{group_name}: References non-existent schedule '{schedule_name}'")
-            
+        
             # Check schedule_policy
             schedule_policy = assignment.get('schedule_policy')
             if schedule_policy:
-                if schedule_policy != 'BLOCK' and schedule_policy not in policies_cfg:
+                if schedule_policy not in builtin_policies and schedule_policy not in policies_cfg:
                     self.errors.append(f"assignments.{group_name}: schedule_policy references non-existent policy '{schedule_policy}'")
     
     def _validate_policies(self, policies_cfg: Dict[str, Any], lists_cfg: Dict[str, Any]):

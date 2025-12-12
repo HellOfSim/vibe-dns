@@ -218,7 +218,7 @@ class ListManager:
         from filtering import RuleEngine, DomainCategorizer
         engine = RuleEngine()
         engine.categorizer = DomainCategorizer(self.categories_file)
-    
+
         logger.info(f"Compiling Policy: {policy_name}")
 
         def apply_rules(list_names, action):
@@ -226,11 +226,15 @@ class ListManager:
             count = 0
             geoip_query_count = 0
             geoip_answer_count = 0
-            
+        
             for lname in list_names:
-                rules_set = self.lists_data.get(lname, set())
-                logger.debug(f"  - Applying list '{lname}' ({len(rules_set)} rules) as {action}")
+                if lname not in self.lists_data:
+                    logger.warning(f"  - List '{lname}' not found, skipping")
+                    continue
                 
+                rules_set = self.lists_data[lname]
+                logger.debug(f"  - Applying list '{lname}' ({len(rules_set)} rules) as {action}")
+            
                 for r in rules_set:
                     result = engine.add_rule(r, action=action, list_name=lname)
                     if result == 'geoip':
@@ -238,9 +242,9 @@ class ListManager:
                             geoip_answer_count += 1
                         elif r.startswith('@'):
                             geoip_query_count += 1
-                
-                count += len(rules_set)
             
+                count += len(rules_set)
+        
             return count, geoip_query_count, geoip_answer_count
 
         a_count = 0
@@ -248,29 +252,29 @@ class ListManager:
         d_count = 0
         total_geoip_query = 0
         total_geoip_answer = 0
-    
+
         if 'allow' in policy_config: 
             logger.debug(f"Processing Allow lists for {policy_name}: {policy_config['allow']}")
             a_count, _, _ = apply_rules(policy_config['allow'], 'ALLOW')
-    
+
         if 'block' in policy_config: 
             logger.debug(f"Processing Block lists for {policy_name}: {policy_config['block']}")
             b_count, block_query_geo, block_answer_geo = apply_rules(policy_config['block'], 'BLOCK')
             total_geoip_query += block_query_geo
             total_geoip_answer += block_answer_geo
-    
+
         if 'drop' in policy_config:
             logger.debug(f"Processing Drop lists for {policy_name}: {policy_config['drop']}")
             d_count, drop_query_geo, drop_answer_geo = apply_rules(policy_config['drop'], 'DROP')
             total_geoip_query += drop_query_geo
             total_geoip_answer += drop_answer_geo
-    
+
         allowed_types = policy_config.get('allowed_types', [])
         blocked_types = policy_config.get('blocked_types', [])
         dropped_types = policy_config.get('dropped_types', [])
-    
+
         engine.set_type_filters(allowed_types, blocked_types, dropped_types)
-    
+
         if allowed_types: 
             logger.debug(f"  - Allowed QTypes: {allowed_types}")
         if blocked_types: 
@@ -287,9 +291,9 @@ class ListManager:
         total_geoip = total_geoip_query + total_geoip_answer
         if total_geoip > 0:
             summary += f" | 🌍 {total_geoip} GEO-IP rules ({total_geoip_query} query-only, {total_geoip_answer} answer-only)"
-        
+    
         logger.info(f"✓ {summary}")
-        
+    
         # Detailed GEO-IP logging
         stats = engine.get_stats()
         if stats.get('query_block_geoip', 0) > 0 or stats.get('query_drop_geoip', 0) > 0:
@@ -302,6 +306,5 @@ class ListManager:
                 f"  → Answer GeoIP: {stats.get('answer_block_geoip', 0)} BLOCK, "
                 f"{stats.get('answer_drop_geoip', 0)} DROP (IP-based, double @@)"
             )
-    
-        return engine
 
+        return engine

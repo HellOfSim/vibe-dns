@@ -729,6 +729,15 @@ class DNSHandler:
             decision = {'action': 'BLOCK', 'reason': 'Schedule Policy', 'rule': 'N/A', 'list': 'Schedule', 'category': ''}
             self.decision_cache.put_decision(qname_norm, qtype, group_key, policy_name, decision)
             return self.create_block_response(request, qname, qtype).to_wire()
+        elif policy_name == "DROP":
+            req_logger.info(f"🔇 DROPPED | Reason: Schedule Policy | Schedule: {group} | Policy: DROP")
+            decision = {'action': 'DROP', 'reason': 'Schedule Policy', 'rule': 'N/A', 'list': 'Schedule', 'category': ''}
+            self.decision_cache.put_decision(qname_norm, qtype, group_key, policy_name, decision)
+            return None
+        elif policy_name == "ALLOW":
+            req_logger.info(f"✓ ALLOWED | Reason: Schedule Policy | Schedule: {group} | Policy: ALLOW")
+            decision = {'action': 'ALLOW', 'reason': 'Schedule Policy', 'rule': 'N/A', 'list': 'Schedule', 'category': ''}
+            self.decision_cache.put_decision(qname_norm, qtype, group_key, policy_name, decision)
 
         engine = self.rule_engines.get(policy_name)
         if engine:

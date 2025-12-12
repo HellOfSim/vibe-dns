@@ -100,33 +100,52 @@ class DomainCategorizer:
         except Exception as e:
             logger.error(f"Error loading categories: {e}")
 
+# In filtering.py, replace the entire classify method:
+
     def classify(self, domain_norm: str) -> dict:
         results = {}
         parts = domain_norm.split('.')
         tld = parts[-1] if parts else ""
-        
+    
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"Categorizing domain: {domain_norm}")
+    
         for category, data in self.categories.items():
             score = 0
-            
-            if 'tlds' in data and tld in data['tlds']: 
+            score_details = []
+        
+            if 'tlds' in data and tld in data['tlds']:
                 score = max(score, 90)
-            
+                score_details.append(f"TLD match '.{tld}' → 90")
+        
             if category in self.regex_cache:
                 for pattern in self.regex_cache[category]:
                     if pattern.search(domain_norm):
                         score = max(score, 100)
+                        score_details.append(f"Regex pattern match → 100")
                         break
-            
+        
             if 'keywords' in data:
                 for kw in data['keywords']:
                     if kw in parts:
                         score = max(score, 95)
+                        score_details.append(f"Exact keyword '{kw}' in label → 95")
                     elif kw in domain_norm:
                         score = max(score, 70)
-            
-            if score > 0: 
-                results[category] = score
+                        score_details.append(f"Keyword '{kw}' substring → 70")
         
+            if score > 0:
+                results[category] = score
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        f"  Category '{category}': {score}% confidence | "
+                        f"Domain: {domain_norm} | "
+                        f"Reasons: {', '.join(score_details)}"
+                    )
+    
+        if logger.isEnabledFor(logging.DEBUG) and not results:
+            logger.debug(f"  No categories matched for domain: {domain_norm}")
+    
         return results
 
 class RuleEngine:
