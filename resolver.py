@@ -240,9 +240,24 @@ class DNSHandler:
             logger.info(f"DNSHandler Ready. GeoIP: DISABLED, BlockMode: {self.ip_block_mode}")
 
     def _build_client_maps(self, groups: Dict[str, list]):
+        self.group_default_actions: Dict[str, str] = {}
+
         for gname, identifiers in groups.items():
             if not identifiers: continue
-            for ident in identifiers:
+
+            default_action = None
+            start_idx = 0
+
+            if identifiers and isinstance(identifiers[0], dict):
+                if 'default_action' in identifiers[0]:
+                    default_action = identifiers[0]['default_action'].upper()
+                    if default_action in ['ALLOW', 'BLOCK', 'DROP']:
+                        self.group_default_actions[gname] = default_action
+                        start_idx = 1
+                    else:
+                        logger.warning(f"Group '{gname}': invalid default_action '{identifiers[0]['default_action']}'")
+
+            for ident in identifiers[start_idx:]:
                 ident_lower = ident.lower().strip()
                 if ident_lower.startswith('server_ip:'):
                     self.group_srv_ip_map[ident_lower[10:]] = gname
@@ -404,7 +419,14 @@ class DNSHandler:
         return False
 
     def get_active_policy(self, group, req_logger):
+        # Check if group has default_action
+        if group and group in self.group_default_actions:
+            action = self.group_default_actions[group]
+            req_logger.info(f"Using group default_action: {action}")
+            return action
+
         if not group or group not in self.policy_map: return self.DEFAULT_POLICY_SCOPE
+
         assignment = self.policy_map[group]
         default_policy = assignment.get('policy', self.DEFAULT_POLICY_SCOPE)
         schedule_name = assignment.get('schedule')

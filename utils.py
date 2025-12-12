@@ -624,18 +624,25 @@ def merge_groups(inline_groups, file_loader):
     File groups take precedence and are added to inline groups.
     """
     merged = {}
-    
+
     for group_name, identifiers in inline_groups.items():
         if isinstance(identifiers, list):
-            merged[group_name] = set(id.lower().strip() for id in identifiers)
+            # Filter out action dicts, only process string identifiers
+            filtered = []
+            for item in identifiers:
+                if isinstance(item, dict):
+                    continue  # Skip action dicts
+                elif isinstance(item, str):
+                    filtered.append(item.lower().strip())
+            merged[group_name] = set(filtered)
         else:
             merged[group_name] = set()
-    
+
     if file_loader:
         for group_name, file_identifiers in file_loader.get_all_groups().items():
             if group_name not in merged:
                 merged[group_name] = set()
             merged[group_name].update(file_identifiers)
-    
+
     return {name: list(ids) for name, ids in merged.items()}
 

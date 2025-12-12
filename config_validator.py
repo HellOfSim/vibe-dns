@@ -306,28 +306,42 @@ class ConfigValidator:
         empty_rcode = response_cfg.get('cname_empty_rcode', 'NXDOMAIN')
         if empty_rcode not in valid_empty_rcodes:
              self.errors.append(f"response.cname_empty_rcode: Invalid rcode '{empty_rcode}', must be one of {valid_empty_rcodes}")
-    
+
     def _is_valid_mac(self, mac_str: str) -> bool:
-        """Validate MAC address format (inlined)"""
+        """Validate MAC address format"""
         pattern = re.compile(r'^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$')
         return bool(pattern.match(mac_str))
-    
+
     def _validate_groups(self, groups_cfg: Dict[str, Any]):
         """Validate client groups configuration"""
         if not isinstance(groups_cfg, dict):
             self.errors.append("groups: Must be a dictionary")
             return
-        
+    
         for group_name, identifiers in groups_cfg.items():
             if not isinstance(identifiers, list):
                 self.errors.append(f"groups.{group_name}: Must be a list")
                 continue
-            
-            for ident in identifiers:
+        
+            # Check if first item is default_action dict
+            start_idx = 0
+            if identifiers and isinstance(identifiers[0], dict):
+                action_dict = identifiers[0]
+                if 'default_action' in action_dict:
+                    action = action_dict['default_action']
+                    if action not in ['ALLOW', 'BLOCK', 'DROP']:
+                        self.errors.append(f"groups.{group_name}: default_action must be 'ALLOW', 'BLOCK', or 'DROP', got '{action}'")
+                    start_idx = 1
+                else:
+                    self.errors.append(f"groups.{group_name}: First dict item must contain 'default_action' key")
+                    continue
+        
+            # Validate remaining identifiers
+            for ident in identifiers[start_idx:]:
                 if not isinstance(ident, str):
                     self.errors.append(f"groups.{group_name}: Invalid identifier '{ident}' (must be string)")
                     continue
-                
+            
                 ident_lower = ident.lower()
                 
                 # Check special identifiers
