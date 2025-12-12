@@ -15,7 +15,11 @@ DEFAULT_CONFIG = {
         'use_ecs': True,
         'use_edns_mac': True,
         'forward_ecs_mode': 'none',
-        'forward_mac_mode': 'none'
+        'forward_mac_mode': 'none',
+        'ecs_ipv4_mask': 24,
+        'ecs_ipv6_mask': 56,
+        'ecs_override_ipv4': None,
+        'ecs_override_ipv6': None
     },
     'upstream': {
         'startup_check_enabled': True,
@@ -43,12 +47,12 @@ DEFAULT_CONFIG = {
         'ttl': 300
     },
     'rate_limit': {
-        'enabled': True,
+        'enabled': False,
         'window_seconds': 60,
         'udp_threshold': 100,
         'total_threshold': 200,
-        'ipv4_mask': 32,
-        'ipv6_mask': 128
+        'ipv4_mask': 24,
+        'ipv6_mask': 64
     },
     'response': {
         'block_rcode': 'REFUSED',

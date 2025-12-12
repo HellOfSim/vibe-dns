@@ -112,7 +112,7 @@ class ConfigValidator:
                             self.warnings.append(f"server.{port_key}: Port {port} requires root/admin privileges")
         
         # Check modes
-        valid_ecs_modes = ['none', 'preserve', 'add']
+        valid_ecs_modes = ['none', 'preserve', 'add', 'privacy', 'override']
         ecs_mode = server_cfg.get('forward_ecs_mode', 'none')
         if ecs_mode not in valid_ecs_modes:
             self.errors.append(f"server.forward_ecs_mode: Invalid mode '{ecs_mode}', must be one of {valid_ecs_modes}")
@@ -121,6 +121,20 @@ class ConfigValidator:
         mac_mode = server_cfg.get('forward_mac_mode', 'none')
         if mac_mode not in valid_mac_modes:
             self.errors.append(f"server.forward_mac_mode: Invalid mode '{mac_mode}', must be one of {valid_mac_modes}")
+
+        # Check ECS Privacy Masks
+        for mask_key, max_val in [('ecs_ipv4_mask', 32), ('ecs_ipv6_mask', 128)]:
+            val = server_cfg.get(mask_key)
+            if val is not None:
+                if not isinstance(val, int) or val < 0 or val > max_val:
+                    self.errors.append(f"server.{mask_key}: Must be integer 0-{max_val}, got {val}")
+
+        # Check ECS Overrides
+        for override_key in ['ecs_override_ipv4', 'ecs_override_ipv6']:
+            val = server_cfg.get(override_key)
+            if val is not None:
+                if not isinstance(val, str) or not is_valid_ip(val):
+                    self.errors.append(f"server.{override_key}: Invalid IP address '{val}'")
     
     def _validate_upstream(self, upstream_cfg: Dict[str, Any]):
         """Validate upstream resolver configuration"""

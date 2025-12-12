@@ -2,10 +2,11 @@
 # filename: resolver.py
 # -----------------------------------------------------------------------------
 # Project: Filtering DNS Server (Refactored)
-# Version: 7.1.0 (Fix: Contextual Policy Logging)
+# Version: 7.4.0 (Fix: ECS String Conversion & Error Logging)
 # -----------------------------------------------------------------------------
 """
 Core DNS Resolution with consolidated EDNS processing and optimizations.
+Now supports ECS Privacy (subnet masking) and ECS Override (forced IP).
 """
 
 import asyncio
@@ -222,6 +223,17 @@ class DNSHandler:
         self.categorization_enabled = self.config.get('categorization_enabled', True)
         self.forward_ecs_mode = server_cfg.get('forward_ecs_mode', 'none').lower()
         self.forward_mac_mode = server_cfg.get('forward_mac_mode', 'none').lower()
+        
+        # ECS Privacy Settings
+        self.ecs_ipv4_mask = server_cfg.get('ecs_ipv4_mask', 24)
+        self.ecs_ipv6_mask = server_cfg.get('ecs_ipv6_mask', 56)
+        
+        # ECS Override Settings
+        self.ecs_override_ipv4 = server_cfg.get('ecs_override_ipv4')
+        self.ecs_override_ipv6 = server_cfg.get('ecs_override_ipv6')
+        
+        # ECS Debugging
+        logger.info(f"DEBUG: ECS Mode initialized as: '{self.forward_ecs_mode}'")
 
         # Build Lookup Maps for Clients
         self.group_ip_map: Dict[str, str] = {}
@@ -334,6 +346,21 @@ class DNSHandler:
                     return ip
                 except: pass
         return None
+
+    def _apply_mask(self, ip_str: str, mask: int) -> Tuple[str, int]:
+        """Truncate IP to specific subnet mask for privacy"""
+        try:
+            ip = ipaddress.ip_address(ip_str)
+            if ip.version == 4:
+                m = min(max(mask, 0), 32)
+                net = ipaddress.IPv4Network(f"{ip_str}/{m}", strict=False)
+                return str(net.network_address), m
+            elif ip.version == 6:
+                m = min(max(mask, 0), 128)
+                net = ipaddress.IPv6Network(f"{ip_str}/{m}", strict=False)
+                return str(net.network_address), m
+        except Exception:
+            return ip_str, 0
 
     def identify_client(self, addr, meta, req_logger) -> str | None:
         srv_ip = (meta.get('server_ip') or '').lower()
@@ -800,17 +827,78 @@ class DNSHandler:
         if policy_name in policies:
              upstream_group = policies[policy_name].get('upstream_group', "Default")
         
-        keep_ecs = (self.forward_ecs_mode == 'preserve')
+        # Check for existing ECS in request for logging purposes
+        incoming_ecs = next((o for o in request.options if isinstance(o, dns.edns.ECSOption)), None)
+        
+        # Determine if we keep incoming ECS options
+        keep_ecs = (self.forward_ecs_mode == 'preserve' or self.forward_ecs_mode == 'privacy')
         keep_mac = (self.forward_mac_mode == 'preserve')
         opts_to_keep = self._process_edns_options(request, keep_ecs=keep_ecs, keep_mac=keep_mac)
 
-        if self.forward_ecs_mode == 'add':
+        # Log ECS Disposition
+        if incoming_ecs:
+             if not keep_ecs and self.forward_ecs_mode != 'privacy':
+                 req_logger.debug(f"[ECS] Stripping client ECS: {incoming_ecs.address}")
+             elif self.forward_ecs_mode == 'preserve':
+                 req_logger.debug(f"[ECS] Preserving client ECS: {incoming_ecs.address}")
+
+        # Handle Privacy Mode (Modify existing ECS)
+        if self.forward_ecs_mode == 'privacy':
+            new_opts = []
+            has_ecs = False
+            for opt in opts_to_keep:
+                if isinstance(opt, dns.edns.ECSOption):
+                    has_ecs = True
+                    try:
+                        mask = self.ecs_ipv4_mask if ipaddress.ip_address(opt.address).version == 4 else self.ecs_ipv6_mask
+                        masked_ip, applied_mask = self._apply_mask(str(opt.address), mask)
+                        new_opts.append(dns.edns.ECSOption(masked_ip, applied_mask))
+                        req_logger.debug(f"[ECS] Privacy Truncation: {opt.address} -> {masked_ip}/{applied_mask}")
+                    except Exception as e:
+                        req_logger.error(f"[ECS] Error processing privacy for {opt.address}: {e}")
+                        pass
+                else:
+                    new_opts.append(opt)
+            opts_to_keep = new_opts
+        else:
+            has_ecs = any(isinstance(o, dns.edns.ECSOption) for o in opts_to_keep)
+
+        # Handle ECS Injection (Add, Privacy-if-missing, or Override)
+        if self.forward_ecs_mode == 'override':
+            # Add IPv4 Override if configured
+            if self.ecs_override_ipv4:
+                try:
+                    ip = ipaddress.ip_address(self.ecs_override_ipv4)
+                    if ip.version == 4:
+                         opts_to_keep.append(dns.edns.ECSOption(str(ip), 32))
+                         req_logger.debug(f"[ECS] Override (IPv4): Forced {ip}/32")
+                except Exception as e:
+                    req_logger.error(f"Invalid IPv4 ECS override: {e}")
+
+            # Add IPv6 Override if configured
+            if self.ecs_override_ipv6:
+                try:
+                    ip = ipaddress.ip_address(self.ecs_override_ipv6)
+                    if ip.version == 6:
+                         opts_to_keep.append(dns.edns.ECSOption(str(ip), 128))
+                         req_logger.debug(f"[ECS] Override (IPv6): Forced {ip}/128")
+                except Exception as e:
+                    req_logger.error(f"Invalid IPv6 ECS override: {e}")
+
+        elif self.forward_ecs_mode == 'add' or (self.forward_ecs_mode == 'privacy' and not has_ecs):
              try:
                 ip = ipaddress.ip_address(client_ip)
-                src_len = 32 if ip.version == 4 else 128
-                opts_to_keep.append(dns.edns.ECSOption(ip, src_len))
-                req_logger.debug(f"Added ECS: {client_ip}")
-             except Exception: pass
+                if self.forward_ecs_mode == 'privacy':
+                    mask = self.ecs_ipv4_mask if ip.version == 4 else self.ecs_ipv6_mask
+                    masked_ip, src_len = self._apply_mask(str(ip), mask)
+                    opts_to_keep.append(dns.edns.ECSOption(masked_ip, src_len))
+                    req_logger.debug(f"[ECS] Added Privacy ECS: {masked_ip}/{src_len} (from {client_ip})")
+                else:
+                    src_len = 32 if ip.version == 4 else 128
+                    opts_to_keep.append(dns.edns.ECSOption(str(ip), src_len))
+                    req_logger.debug(f"[ECS] Added ECS: {client_ip}/{src_len}")
+             except Exception as e:
+                 req_logger.error(f"[ECS] Failed to add ECS for {client_ip}: {e}")
 
         if self.forward_mac_mode == 'add':
             mac = self.mac_mapper.get_mac(client_ip)
