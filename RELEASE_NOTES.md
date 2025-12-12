@@ -4,13 +4,13 @@ This repository includes an automated build pipeline (`.github/workflows/build.y
 
 ## Supported Platforms
 
-| **Platform** | **Architecture** | **Binary Name** | **Notes** | 
-| **Linux** | AMD64 (x86_64) | `vibe-dns-server-linux-amd64` | Built on Debian 10 (Buster) for maximum compatibility (glibc 2.28+). Works on Ubuntu 18.04+, RHEL 8+, etc. | 
-| **macOS** | ARM64 (Apple Silicon) | `vibe-dns-server-macos-arm64` | Built on macOS 14. Requires Apple Silicon (M1/M2/M3). | 
+**Linux**: AMD64 (x86_64) - `vibe-dns-server-linux-amd64` (Built on Debian 10 (Buster) for maximum compatibility (glibc 2.28+). Works on Ubuntu 18.04+, RHEL 8+, etc.).
+
+**macOS**: ARM64 (Apple Silicon) - `vibe-dns-server-macos-arm64` (Built on macOS 14. Requires Apple Silicon M1-M5).
 
 ## Build Artifacts
 
-When a release is tagged (e.g., `v1.0.0`), the following assets are automatically published:
+When a release is tagged, the following assets are automatically published:
 
 1. **Server Executable:** The main DNS server binary.
 
