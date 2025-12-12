@@ -2,7 +2,7 @@
 # filename: geo_regions.py
 # -----------------------------------------------------------------------------
 # Project: Filtering DNS Server
-# Version: 1.0.0
+# Version: 1.0.1
 # -----------------------------------------------------------------------------
 """
 Unified geographic region definitions.
