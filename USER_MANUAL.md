@@ -117,7 +117,7 @@ This generates a `geoip.vibe` file. Ensure this file is referenced in your `conf
 
 ## 📝 Configuration Guide
 
-The core configuration lives in `config.yaml` (renamed from `full_config.yaml`).
+The core configuration lives in `config.yaml`, see [full_config.yaml](https://github.com/cbuijs/vibe-dns/blob/main/full_config.yaml) for more information on all options/features/etc.
 
 ### Server & Networking
 Configure where the DNS server listens.
