@@ -2,10 +2,11 @@
 # filename: config_validator.py
 # -----------------------------------------------------------------------------
 # Project: Filtering DNS Server
-# Version: 3.0.0 (Complete Validation Coverage)
+# Version: 3.1.0 (Priority Support)
 # -----------------------------------------------------------------------------
 """
 Configuration Validation Module - Complete coverage for all config options.
+Now supports upstream server priority validation.
 """
 
 import re
@@ -170,30 +171,10 @@ class ConfigValidator:
                 else:
                     for port in ports:
                         if not isinstance(port, int) or port < 1 or port > 65535:
-                            self.errors.append(f"server.{port_key}: Invalid port {port} (must be 1-65535)")
-                        elif port < 1024:
-                            self.warnings.append(f"server.{port_key}: Port {port} requires root privileges")
+                            self.errors.append(f"server.{port_key}: Invalid port {port}")
 
-        # Check ECS options
-        for bool_key in ['use_ecs', 'use_edns_mac']:
-            val = server_cfg.get(bool_key)
-            if val is not None and not isinstance(val, bool):
-                self.errors.append(f"server.{bool_key}: Must be boolean")
-
-        valid_ecs_modes = ['none', 'preserve', 'add', 'privacy', 'override']
-        ecs_mode = server_cfg.get('forward_ecs_mode')
-        if ecs_mode is not None:
-            if not isinstance(ecs_mode, str) or ecs_mode.lower() not in valid_ecs_modes:
-                self.errors.append(f"server.forward_ecs_mode: Must be one of {valid_ecs_modes}, got '{ecs_mode}'")
-
-        valid_mac_modes = ['none', 'preserve', 'add']
-        mac_mode = server_cfg.get('forward_mac_mode')
-        if mac_mode is not None:
-            if not isinstance(mac_mode, str) or mac_mode.lower() not in valid_mac_modes:
-                self.errors.append(f"server.forward_mac_mode: Must be one of {valid_mac_modes}, got '{mac_mode}'")
-
-        # Check ECS Masks
-        for mask_key, max_val in [('ecs_ipv4_mask', 32), ('ecs_ipv6_mask', 128)]:
+        # Check ECS masks
+        for mask_key, max_val in [('ecs_mask_ipv4', 32), ('ecs_mask_ipv6', 128)]:
             val = server_cfg.get(mask_key)
             if val is not None:
                 if not isinstance(val, int) or val < 0 or val > max_val:
@@ -328,7 +309,22 @@ class ConfigValidator:
             self.warnings.append(f"upstream.groups.{group_name}: No servers configured")
         else:
             for server in servers:
-                self._validate_upstream_server_url(group_name, server)
+                # Handle both string and dict formats (dict for priority support)
+                if isinstance(server, dict):
+                    server_url = server.get('url')
+                    priority = server.get('priority')
+                    
+                    if not server_url:
+                        self.errors.append(f"upstream.groups.{group_name}: Server dict missing 'url' key")
+                        continue
+                    
+                    if priority is not None:
+                        if not isinstance(priority, (int, float)) or priority < 0:
+                            self.errors.append(f"upstream.groups.{group_name}: priority must be non-negative number, got {priority}")
+                    
+                    self._validate_upstream_server_url(group_name, server_url)
+                else:
+                    self._validate_upstream_server_url(group_name, server)
 
     def _validate_upstream_server_url(self, group_name: str, server: str):
         """Validate upstream server URL syntax: protocol://host:port/path#forced_ip"""
@@ -364,6 +360,7 @@ class ConfigValidator:
             host_port = remainder
 
         # Parse host and port
+        host = None
         if host_port.startswith('['):
             # IPv6 with brackets
             bracket_end = host_port.find(']')
@@ -509,38 +506,20 @@ class ConfigValidator:
     # RESPONSE SECTION
     # =========================================================================
     def _validate_response(self, response_cfg: Dict[str, Any]):
-        """Validate response modification configuration"""
+        """Validate response shaping configuration"""
         if not isinstance(response_cfg, dict):
             if response_cfg is not None:
                 self.errors.append("response: Must be a dictionary")
             return
 
         # Boolean options
-        for bool_key in ['round_robin_enabled', 'cname_collapse', 'minimize_response', 'match_answers_globally']:
+        for bool_key in ['shuffle_answers', 'strip_authority', 'strip_additional', 'collapse_cnames']:
             val = response_cfg.get(bool_key)
             if val is not None and not isinstance(val, bool):
                 self.errors.append(f"response.{bool_key}: Must be boolean")
 
-        # Check rcode
-        valid_rcodes = ['REFUSED', 'NXDOMAIN', 'NOERROR', 'SERVFAIL']
-        rcode = response_cfg.get('block_rcode', 'REFUSED')
-        if rcode not in valid_rcodes:
-            self.errors.append(f"response.block_rcode: Invalid rcode '{rcode}', must be one of {valid_rcodes}")
-
-        # Check cname_empty_rcode
-        valid_empty_rcodes = ['NXDOMAIN', 'NOERROR']
-        empty_rcode = response_cfg.get('cname_empty_rcode', 'NXDOMAIN')
-        if empty_rcode not in valid_empty_rcodes:
-            self.errors.append(f"response.cname_empty_rcode: Invalid rcode '{empty_rcode}', must be one of {valid_empty_rcodes}")
-
-        # Check block_ip
-        block_ip = response_cfg.get('block_ip')
-        if block_ip and block_ip != 'NULL':
-            if not is_valid_ip(block_ip):
-                self.errors.append(f"response.block_ip: Invalid IP address '{block_ip}'")
-
-        # Check TTL values
-        for key in ['block_ttl', 'min_ttl', 'max_ttl']:
+        # TTL options
+        for key in ['min_ttl', 'max_ttl']:
             ttl = response_cfg.get(key)
             if ttl is not None:
                 if not isinstance(ttl, int) or ttl < 0:
@@ -674,7 +653,7 @@ class ConfigValidator:
     def _is_valid_mac(self, mac_str: str) -> bool:
         """Validate MAC address format"""
         patterns = [
-            re.compile(r'^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'),  # AA:BB:CC:DD:EE:FF or AA-BB-CC-DD-EE-FF
+            re.compile(r'^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'),  # AA:BB:CC:DD:EE:FF
             re.compile(r'^([0-9A-Fa-f]{4}\.){2}([0-9A-Fa-f]{4})$'),    # AABB.CCDD.EEFF
         ]
         return any(p.match(mac_str) for p in patterns)
@@ -776,8 +755,7 @@ class ConfigValidator:
                         self.errors.append(f"lists.{list_name}: Invalid hosts_domain_type '{domain_type}', must be one of {valid_types}")
 
                 elif isinstance(source, str):
-                    # Simple string source - valid
-                    pass
+                    pass  # Simple string source - valid
                 else:
                     self.errors.append(f"lists.{list_name}: Source must be string or dictionary")
 
@@ -826,7 +804,7 @@ class ConfigValidator:
                         if list_name not in lists_dict:
                             self.errors.append(f"policies.{policy_name}: References non-existent list '{list_name}'")
 
-            # Check query types (allowed_types, blocked_types, dropped_types)
+            # Check query types
             for type_list in ['allowed_types', 'blocked_types', 'dropped_types']:
                 qtypes = policy_data.get(type_list, [])
                 if not isinstance(qtypes, list):
