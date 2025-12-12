@@ -1,11 +1,6 @@
 # =============================================================================
-# VIBE-DNS COMPLETE REFERENCE CONFIGURATION
-# Based on codebase v9.0.0+ (ASN, GeoIP, and Policy Engine updates)
-# =============================================================================
-
-# =============================================================================
 # 1. LOGGING
-# Controls how and where the server records events.
+# found in: utils.py, defaults.py
 # =============================================================================
 logging:
   # Logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL
@@ -30,67 +25,74 @@ logging:
 
 # =============================================================================
 # 2. SERVER NETWORKING
-# Listener configuration and EDNS handling.
+# found in: server.py, resolver.py
 # =============================================================================
 server:
   # List of IPs to listen on. Use "0.0.0.0" for all IPv4, "::" for all IPv6.
-  # If empty, it defaults to all interfaces.
   bind_ip: 
     - "0.0.0.0"
     - "::"
   
-  # OPTIONAL: Bind by interface name instead of IP. 
-  # The server will resolve these to IPs at startup.
-  # Note: bind_ip takes precedence if both are set, or they can be mixed.
+  # OPTIONAL: Bind by interface name (requires 'netifaces' module or 'ip' command). 
+  # These are resolved to IPs at startup and added to bind_ip.
   # bind_interfaces: 
   #   - "eth0"
   #   - "wg0"
   
-  # Ports to listen on (List of integers)
-  # Port 53 requires root privileges.
+  # Ports to listen on (List of integers). Standard is 53.
   port_udp: [53]
   port_tcp: [53]
   
   # --- EDNS Client Subnet (ECS) Handling ---
-  # Enable parsing of ECS data from clients
+  # Enable parsing of ECS data from incoming clients
   use_ecs: true
   
   # How to handle ECS when forwarding to upstream:
-  # - none:     Strip ECS data (Privacy / Default)
+  # - none:     Strip ECS data (Default/Privacy)
   # - preserve: Forward client's provided ECS data if present
   # - add:      Inject the client's actual IP as ECS data
+  # - privacy:  Truncate client IP to mask (defined below) before forwarding
+  # - override: Force a specific IP (defined below) to be sent as ECS
   forward_ecs_mode: "none"
+
+  # ECS Masks for 'privacy' mode (Subnet bits to keep)
+  ecs_ipv4_mask: 24
+  ecs_ipv6_mask: 56
+
+  # ECS Overrides for 'override' mode (Simulate request from this IP)
+  # ecs_override_ipv4: "1.2.3.4"
+  # ecs_override_ipv6: "2001:db8::1"
 
   # --- MAC Address Handling ---
   # Enable parsing of custom EDNS MAC option (Code 65001)
   use_edns_mac: true
   
-  # How to handle MAC forwarding to upstream (custom option 65001):
-  # - none:     Do not send MAC to upstream (Default)
+  # How to handle MAC forwarding to upstream:
+  # - none:     Do not send MAC to upstream
   # - preserve: Forward existing MAC option if present
-  # - add:      Resolve client MAC from ARP/Neighbor table and inject it
+  # - add:      Resolve client MAC from ARP table and inject it via EDNS
   forward_mac_mode: "none"
 
 # =============================================================================
 # 3. GEOIP CONFIGURATION
-# Geographic filtering and location awareness.
+# found in: geoip.py, cctld.py
 # =============================================================================
 geoip:
   # Master switch for GeoIP functionality
   enabled: true
   
-  # Path to the binary database compiled via geoip_compiler.py (Recommended)
+  # Path to the binary database compiled via geoip_compiler.py
   unified_database: "./geoip.vibe"
   
-  # Logic for mapping Domain TLDs to Countries (e.g. .fr -> France)
-  # - geoip_only:  Ignore TLDs. Only use IP-based lookup. (Most accurate)
-  # - cctld_first: If domain TLD matches a blocked location, block immediately.
+  # Logic for mapping Domain TLDs (e.g., .cn) vs IP Locations
+  # - geoip_only:  Ignore TLDs. Only use IP-based lookup of the answer.
+  # - cctld_first: If domain TLD matches a blocked location, block query immediately.
   # - cctld_geoip: Use TLD as a hint to disambiguate IP location.
   cctld_mode: "geoip_only"
 
 # =============================================================================
 # 4. UPSTREAM RESOLUTION
-# Configuration for external DNS resolvers.
+# found in: upstream_manager.py
 # =============================================================================
 upstream:
   # Check if upstreams are reachable before starting the server
@@ -154,10 +156,10 @@ upstream:
 
 # =============================================================================
 # 5. CACHING
-# Internal DNS response caching.
+# found in: cache_stats.py, resolver.py
 # =============================================================================
 cache:
-  # Max number of DNS records to hold in memory
+  # Max number of DNS records to hold in memory. 0 to disable.
   size: 10000
   
   # Garbage collection interval (seconds)
@@ -187,7 +189,7 @@ deduplication:
 
 # =============================================================================
 # 6. RATE LIMITING
-# Protection against abuse/flooding.
+# found in: resolver.py
 # =============================================================================
 rate_limit:
   enabled: true
@@ -209,7 +211,7 @@ rate_limit:
 
 # =============================================================================
 # 7. RESPONSE MODIFICATION
-# How the server constructs answers.
+# found in: resolver.py
 # =============================================================================
 response:
   # Randomize order of A/AAAA records (Simple Load balancing for client)
@@ -248,19 +250,20 @@ response:
   # - block:  Block the *entire* response if it contains any blocked IP.
   ip_block_mode: "filter"
   
-  # Apply blocklists/GeoIP rules to IPs found inside the answer section recursively
+  # Apply blocklists/GeoIP rules to IPs found inside the answer section recursively.
+  # If false, only checks explicit IP blocklists, not domain blocklists on answers.
   match_answers_globally: false
 
 # =============================================================================
 # 8. CATEGORIZATION
-# Domain classification engine.
+# found in: filtering.py
 # =============================================================================
 categorization_enabled: true
 categories_file: "categories.json"
 
 # =============================================================================
 # 9. CLIENT GROUPS
-# Mapping clients to identifiers.
+# found in: server.py, resolver.py
 # =============================================================================
 # How often to refresh ARP/Neigh tables for MAC resolution (Seconds)
 mac_cache_refresh_interval: 300
@@ -270,8 +273,8 @@ mac_cache_refresh_interval: 300
 # - IP Address (192.168.1.5)
 # - CIDR Subnet (192.168.1.0/24)
 # - MAC Address (aa:bb:cc:dd:ee:ff)
-# - GeoIP Tag (geoip:US, geoip:EUROPE)
-# - Server Bind IP (server_ip:10.0.0.1) - useful for VLAN gateways
+# - GeoIP Tag (geoip:US, geoip:EUROPE) - Matches based on Source IP location
+# - Server Bind IP (server_ip:10.0.0.1) - useful for VLAN gateways listening on specific IPs
 # - Server Port (server_port:5353) - useful for specific listeners
 groups:
   admin_devices:
@@ -280,13 +283,14 @@ groups:
   
   iot_vlan:
     # OPTIONAL: Set a default action for this group (ALLOW, BLOCK, DROP)
-    # If set, this overrides policies for unhandled domains.
+    # If set, this overrides policies for unhandled domains, effectively acting as a whitelist mode if set to BLOCK.
     - { default_action: "ALLOW" }
     - "10.0.50.0/24"
     - "server_ip:10.0.50.1"
   
   kids:
     - "10.0.0.10"
+    - "geoip:NL" # Example: Apply 'kids' policy to anyone connecting from Netherlands IP
     
   vpn_users:
     - "server_ip:10.8.0.1"
@@ -299,16 +303,19 @@ group_files:
 
 # =============================================================================
 # 10. SCHEDULES
-# Time-based policy activation.
+# found in: resolver.py
 # =============================================================================
 schedules:
   bedtime:
     - { days: ["Mon", "Tue", "Wed", "Thu", "Sun"], start: "21:00", end: "07:00" }
     - { days: ["Fri", "Sat"], start: "23:00", end: "08:00" }
 
+  work_hours:
+    - { days: ["Mon", "Tue", "Wed", "Thu", "Fri"], start: "09:00", end: "17:00" }
+
 # =============================================================================
 # 11. FILTER LISTS
-# Sources for blocking/allow rules.
+# found in: list_manager.py
 # =============================================================================
 # Auto-refresh interval for downloading lists (seconds)
 list_refresh_interval: 86400
@@ -338,10 +345,10 @@ lists:
 
 # =============================================================================
 # 12. POLICIES
-# Logic combining Upstreams, Lists, and Actions.
+# found in: filtering.py, resolver.py
 # =============================================================================
 policies:
-  # Default policy if no group matches
+  # Default policy if no group matches (Implicit)
   Default:
     upstream_group: "Default"
   
@@ -356,11 +363,12 @@ policies:
     drop: []
     
     # Query Type Filtering
-    allowed_types: ["A", "AAAA", "CNAME", "HTTPS"]
+    allowed_types: ["A", "AAAA", "CNAME", "HTTPS"] # If set, only these are allowed
     blocked_types: ["TXT", "ANY"] # Returns Block RCODE
     dropped_types: []             # Returns nothing (timeout)
     
     # Category-based rules (requires categorization_enabled)
+    # actions: ALLOW, BLOCK, DROP
     category_rules:
       gambling:
         min_confidence: 85  # Only block if confidence > 85%
@@ -372,9 +380,16 @@ policies:
         min_confidence: 90
         action: "DROP"
 
+  # Example of an "Allow-List Only" policy (Walled Garden)
+  IoTPolicy:
+    upstream_group: "Default"
+    allow: ["my_whitelist"]
+    # Note: To make this strictly whitelist-only, set the Group's 'default_action' to BLOCK
+    # or ensure a 'block all' list is applied here.
+
 # =============================================================================
 # 13. ASSIGNMENTS
-# Linking Groups -> Policies -> Schedules
+# found in: resolver.py
 # =============================================================================
 assignments:
   # Group Name matches keys in 'groups' section
@@ -382,10 +397,11 @@ assignments:
     policy: "KidsPolicy"
     schedule: "bedtime"
     # Policy to apply when schedule is ACTIVE (Built-in policies: BLOCK, ALLOW, DROP)
+    # Can also be a custom policy name
     schedule_policy: "BLOCK" 
     
   iot_vlan:
-    policy: "Default"
+    policy: "IoTPolicy"
     
   admin_devices:
     policy: "Default"
