@@ -622,16 +622,19 @@ def merge_groups(inline_groups, file_loader):
     """
     Merge inline groups from config with groups loaded from files.
     File groups take precedence and are added to inline groups.
+    Preserves default_action dictionaries.
     """
     merged = {}
+    group_actions = {}  # Store default actions temporarily
 
     for group_name, identifiers in inline_groups.items():
         if isinstance(identifiers, list):
-            # Filter out action dicts, only process string identifiers
             filtered = []
             for item in identifiers:
                 if isinstance(item, dict):
-                    continue  # Skip action dicts
+                    # Preserve the action dictionary
+                    if 'default_action' in item:
+                        group_actions[group_name] = item
                 elif isinstance(item, str):
                     filtered.append(item.lower().strip())
             merged[group_name] = set(filtered)
@@ -644,5 +647,13 @@ def merge_groups(inline_groups, file_loader):
                 merged[group_name] = set()
             merged[group_name].update(file_identifiers)
 
-    return {name: list(ids) for name, ids in merged.items()}
+    # Reconstruct list with action dict at the front
+    final_groups = {}
+    for name, ids in merged.items():
+        group_list = list(ids)
+        if name in group_actions:
+            group_list.insert(0, group_actions[name])
+        final_groups[name] = group_list
+
+    return final_groups
 
