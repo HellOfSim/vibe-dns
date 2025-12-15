@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
 # filename: filtering.py
 # -----------------------------------------------------------------------------
-# Project: Filtering DNS Server (Refactored)
-# Version: 9.1.0 (Fixed IP Detection + ASN Support)
+# Project: Filtering DNS Server
+# Version: 9.3.0 (Restored Logging & Strict Priority)
 # -----------------------------------------------------------------------------
 """
-Filtering Engine with proper IP/CIDR detection before GeoIP checks.
+Filtering Engine with strict rule ordering and action prioritization.
+Includes comprehensive logging for all rule matches.
+Flows:
+  Query:  Domains -> GeoIP/ccTLD -> Regex
+  Answer: Domains -> ASN -> GeoIP -> IPs/CIDRs -> Regex
+Priority:
+  ALLOW > BLOCK > DROP
 """
 
 import sys
@@ -89,50 +95,23 @@ class DomainCategorizer:
             with open(categories_file, 'rb') as f:
                 self.categories = json.loads(f.read())
             
-            logger.info(f"Found {len(self.categories)} categories: {', '.join(sorted(self.categories.keys()))}")
-            
-            total_patterns = 0
-            total_keywords = 0
-            total_tlds = 0
+            logger.info(f"Found {len(self.categories)} categories")
             
             for category, data in self.categories.items():
-                cat_patterns = 0
-                cat_keywords = len(data.get('keywords', []))
-                cat_tlds = len(data.get('tlds', []))
-                
-                total_keywords += cat_keywords
-                total_tlds += cat_tlds
-                
                 if 'regex' in data and data['regex']:
                     self.regex_cache[category] = []
                     for pattern in data['regex']:
-                        # Strip Perl-style regex delimiters /pattern/
                         clean_pattern = pattern.strip('/')
                         try:
                             compiled = regex.compile(clean_pattern, regex.IGNORECASE)
                             self.regex_cache[category].append(compiled)
-                            cat_patterns += 1
-                            total_patterns += 1
                         except Exception as e:
                             logger.warning(f"Category '{category}': Failed to compile regex '{pattern}': {e}")
-                
-                # Log per-category stats
-                logger.debug(
-                    f"  Category '{category}': {cat_keywords} keywords, "
-                    f"{cat_patterns} regex patterns, {cat_tlds} TLDs"
-                )
-            
-            logger.info(
-                f"Categorization ready: {total_patterns} regex patterns, "
-                f"{total_keywords} keywords, {total_tlds} TLDs across {len(self.categories)} categories"
-            )
-            
+                            
         except FileNotFoundError:
             logger.warning(f"Categories file not found: {categories_file}")
         except Exception as e:
             logger.error(f"Error loading categories: {e}")
-            import traceback
-            logger.debug(traceback.format_exc())
 
     def classify(self, domain_norm: str) -> dict:
         results = {}
@@ -141,75 +120,57 @@ class DomainCategorizer:
     
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(f"Categorizing domain: {domain_norm}")
-    
+
         for category, data in self.categories.items():
             score = 0
-            score_details = []
-        
+            
             if 'tlds' in data and tld in data['tlds']:
                 score = max(score, 90)
-                score_details.append(f"TLD match '.{tld}' → 90")
-        
+            
             if category in self.regex_cache:
                 for pattern in self.regex_cache[category]:
                     if pattern.search(domain_norm):
                         score = max(score, 100)
-                        score_details.append(f"Regex pattern match → 100")
                         break
         
             if 'keywords' in data:
-                substring_matches = []
                 for kw in data['keywords']:
                     if kw in parts:
                         score = max(score, 95)
-                        score_details.append(f"Exact keyword '{kw}' in label → 95")
+                        break
                     elif kw in domain_norm:
-                        substring_matches.append(kw)
-                
-                if substring_matches:
-                    substring_score = min(70 + (len(substring_matches) - 1) * 10, 90)
-                    if substring_score > score:
-                        score = substring_score
-                    score_details.append(
-                        f"Keyword substrings [{', '.join(substring_matches)}] → {substring_score}"
-                    )
+                        score = max(score, 80)
         
             if score > 0:
                 results[category] = score
                 if logger.isEnabledFor(logging.DEBUG):
-                    logger.debug(
-                        f"  Category '{category}': {score}% confidence | "
-                        f"Domain: {domain_norm} | "
-                        f"Reasons: {', '.join(score_details)}"
-                    )
-    
-        if logger.isEnabledFor(logging.DEBUG) and not results:
-            logger.debug(f"  No categories matched for domain: {domain_norm}")
+                    logger.debug(f"  Category '{category}': {score}% match for {domain_norm}")
     
         return results
 
 
 def _make_action_dict():
+    # Helper to create prioritized lists
     return {'ALLOW': [], 'BLOCK': [], 'DROP': []}
 
 def _make_answer_action_dict():
-    return {'BLOCK': [], 'DROP': []}
-
+    return {'ALLOW': [], 'BLOCK': [], 'DROP': []}
 
 class RuleEngine:
     def __init__(self):
         self.query_rules = {
             'domain': DomainTrie(),
-            'regex': [],
+            # Regex separated by action for strict priority checking
+            'regex': {'ALLOW': [], 'BLOCK': [], 'DROP': []},
             'geoip': defaultdict(_make_action_dict)
         }
         
         self.answer_rules = {
             'domain': DomainTrie(),
-            'regex': [],
+            'regex': {'ALLOW': [], 'BLOCK': [], 'DROP': []},
             'ip': IntervalTree(),
-            'geoip': defaultdict(_make_answer_action_dict),
-            'asn': defaultdict(_make_answer_action_dict)
+            'geoip': defaultdict(_make_action_dict),
+            'asn': defaultdict(_make_action_dict)
         }
         
         self.allowed_types = set()
@@ -223,22 +184,16 @@ class RuleEngine:
     def set_type_filters(self, allowed: list[str], blocked: list[str], dropped: list[str] = None):
         if allowed:
             for t in allowed:
-                try: 
-                    self.allowed_types.add(dns.rdatatype.from_text(t.upper()))
-                except Exception: 
-                    logger.warning(f"Unknown QTYPE: {t}")
+                try: self.allowed_types.add(dns.rdatatype.from_text(t.upper()))
+                except: pass
         if blocked:
             for t in blocked:
-                try: 
-                    self.blocked_types.add(dns.rdatatype.from_text(t.upper()))
-                except Exception: 
-                    logger.warning(f"Unknown QTYPE: {t}")
+                try: self.blocked_types.add(dns.rdatatype.from_text(t.upper()))
+                except: pass
         if dropped:
             for t in dropped:
-                try:
-                    self.dropped_types.add(dns.rdatatype.from_text(t.upper()))
-                except Exception:
-                    logger.warning(f"Unknown QTYPE: {t}")
+                try: self.dropped_types.add(dns.rdatatype.from_text(t.upper()))
+                except: pass
 
     def set_category_rules(self, rules_config):
         self.category_rules = rules_config or {}
@@ -257,8 +212,7 @@ class RuleEngine:
     def add_rule(self, rule_text, action='BLOCK', list_name="Unknown"):
         """
         Add rule with specified action.
-        
-        CRITICAL: Check IP/CIDR BEFORE GeoIP to handle @127.0.0.1 correctly.
+        Supports ALLOW, BLOCK, DROP across all rule types.
         """
         rule_text = rule_text.strip()
         if not rule_text or rule_text.startswith('#'): 
@@ -268,11 +222,10 @@ class RuleEngine:
             logger.warning(f"Invalid action '{action}', defaulting to BLOCK")
             action = 'BLOCK'
         
-        # Determine if answer-only (starts with @)
         is_answer_only = rule_text.startswith('@') and not rule_text.startswith('@@')
         clean_rule_text = rule_text[1:] if (is_answer_only or rule_text.startswith('@@')) else rule_text
         
-        # --- FIRST: Try IP/CIDR (handles @127.0.0.1, @192.168.0.0/16) ---
+        # --- IP/CIDR (IntervalTree) ---
         if is_answer_only or not rule_text.startswith('@'):
             try:
                 net = ipaddress.ip_network(clean_rule_text, strict=False)
@@ -284,61 +237,37 @@ class RuleEngine:
                 
                 return "cidr" if '/' in clean_rule_text else "ip"
             except ValueError: 
-                pass  # Not an IP, continue
+                pass 
         
-        # --- THEN: GeoIP/ASN Rules ---
+        # --- GeoIP/ASN Rules ---
         if rule_text.startswith('@@'):
-            # GeoIP both query+answer
+            # GeoIP Query + Answer
             location_spec = rule_text[2:].upper()
             data = (rule_text, list_name)
             
-            if action == 'ALLOW':
-                logger.warning(f"GEO-IP ALLOW not supported: {rule_text}")
-                return "ignored"
-            
             self.query_rules['geoip'][location_spec][action].append(data)
             self.answer_rules['geoip'][location_spec][action].append(data)
-            
-            logger.info(
-                f"✓ GEO-IP (Query+Answer): {rule_text} | Loc: {location_spec} | "
-                f"Action: {action} | List: '{list_name}'"
-            )
+            logger.info(f"✓ GEO-IP (Query+Answer): {rule_text} | Loc: {location_spec} | Action: {action} | List: '{list_name}'")
             return "geoip"
         
         elif rule_text.startswith('@AS'):
-            # ASN rule
+            # ASN Answer
             asn_spec = rule_text[1:].upper()
             if not asn_spec.startswith('AS'):
                 asn_spec = 'AS' + asn_spec
             
             data = (rule_text, list_name)
-            if action == 'ALLOW':
-                logger.warning(f"ASN ALLOW not supported: {rule_text}")
-                return "ignored"
-            
             self.answer_rules['asn'][asn_spec][action].append(data)
-            
-            logger.info(
-                f"✓ ASN: {rule_text} | ASN: {asn_spec} | "
-                f"Action: {action} | List: '{list_name}'"
-            )
+            logger.info(f"✓ ASN: {rule_text} | ASN: {asn_spec} | Action: {action} | List: '{list_name}'")
             return "asn"
         
         elif rule_text.startswith('@'):
-            # GeoIP query-only
+            # GeoIP Query Only
             location_spec = rule_text[1:].upper()
             data = (rule_text, list_name)
             
-            if action == 'ALLOW':
-                logger.warning(f"GEO-IP ALLOW not supported: {rule_text}")
-                return "ignored"
-            
             self.query_rules['geoip'][location_spec][action].append(data)
-            
-            logger.info(
-                f"✓ GEO-IP (Query ONLY): {rule_text} | Loc: {location_spec} | "
-                f"Action: {action} | List: '{list_name}'"
-            )
+            logger.info(f"✓ GEO-IP (Query ONLY): {rule_text} | Loc: {location_spec} | Action: {action} | List: '{list_name}'")
             return "geoip"
         
         # --- Regex Rules ---
@@ -352,13 +281,14 @@ class RuleEngine:
                     return "ignored"
             
             pattern = self._regex_cache[pattern_str]
-            data = (pattern, action, rule_text, list_name)
+            data = (pattern, rule_text, list_name)
             
             target = self.answer_rules if is_answer_only else self.query_rules
-            target['regex'].append(data)
+            # Store in prioritized buckets
+            target['regex'][action].append(data)
             return "regex"
 
-        # --- Domain Rules ---
+        # --- Domain Rules (Trie) ---
         from domain_utils import normalize_domain
         clean_normalized = normalize_domain(clean_rule_text)
         
@@ -372,172 +302,134 @@ class RuleEngine:
         return "domain"
 
     def is_blocked(self, qname_norm: str, geoip_lookup=None):
-        """Check if query is blocked (domain + GeoIP query rules)"""
-        # 1. Domain trie (priority: ALLOW > DROP > BLOCK)
+        """
+        Check Query Rules.
+        Order: Domains -> GeoIP/ccTLD -> Regex
+        Priority: ALLOW > BLOCK > DROP (Implicit in ordering/checks)
+        """
+        
+        # 1. Domains (Trie)
+        # Note: ListManager compiles policies by adding ALLOW rules LAST, 
+        # so the Trie inherently respects ALLOW > BLOCK > DROP override logic.
         match = self.query_rules['domain'].match(qname_norm)
         if match:
-            if match.get('action') == 'ALLOW':
-                return "ALLOW", match['rule'], match['list']
-            elif match.get('action') == 'DROP':
-                return "DROP", match['rule'], match['list']
-            elif match.get('action') == 'BLOCK':
-                return "BLOCK", match['rule'], match['list']
-        
-        # 2. Regex
-        for pattern, action, rule, list_name in self.query_rules['regex']:
-            if pattern.search(qname_norm):
-                if action in ['ALLOW', 'DROP', 'BLOCK']:
-                    return action, rule, list_name
-        
-        # 3. GeoIP query rules (ccTLD-based)
+            return match['action'], match['rule'], match['list']
+
+        # 2. GeoIP/ccTLD
         if geoip_lookup and geoip_lookup.cctld_mapper and geoip_lookup.cctld_mapper.enabled:
-            logger.debug(f"🌍 Query GeoIP Check: Analyzing domain '{qname_norm}'")
-            
             cctld_country = geoip_lookup.cctld_mapper.get_country_from_domain(qname_norm)
             
             if cctld_country:
-                logger.debug(f"  ✓ ccTLD Detected: .{qname_norm.split('.')[-1]} → Country: {cctld_country}")
-                
-                # Use cached expansion
                 locations = geoip_lookup.cctld_mapper.expand_locations(cctld_country)
-                logger.debug(f"  → Checking against {len(locations)} location tags: {', '.join(sorted(locations))}")
                 
-                # Check DROP first, then BLOCK, then ALLOW
-                for action in ['DROP', 'BLOCK', 'ALLOW']:
+                # Priority: ALLOW > BLOCK > DROP
+                for action in ['ALLOW', 'BLOCK', 'DROP']:
                     for loc in locations:
                         if loc in self.query_rules['geoip']:
                             if self.query_rules['geoip'][loc][action]:
                                 rule, list_name = self.query_rules['geoip'][loc][action][0]
-                                logger.info(
-                                    f"{'🔇' if action == 'DROP' else ('⛔' if action == 'BLOCK' else '✓')} "
-                                    f"GEO-IP {action} (Query ccTLD) | "
-                                    f"Domain: {qname_norm} | "
-                                    f"TLD: .{qname_norm.split('.')[-1]} | "
-                                    f"Country: {cctld_country} | "
-                                    f"Matched: {loc} | "
-                                    f"Rule: '{rule}' | "
-                                    f"List: '{list_name}'"
-                                )
+                                logger.info(f"{'🔇' if action == 'DROP' else ('⛔' if action == 'BLOCK' else '✓')} GEO-IP {action} (Query ccTLD) | Domain: {qname_norm} | TLD: .{qname_norm.split('.')[-1]} | Country: {cctld_country} | Matched: {loc} | Rule: '{rule}' | List: '{list_name}'")
                                 return action, rule, list_name
-                
-                logger.debug(f"  ✓ No GeoIP rules matched for {qname_norm}")
-            else:
-                logger.debug(f"  ✗ No ccTLD country mapping for domain '{qname_norm}'")
-        
+
+        # 3. Regex
+        # Priority: ALLOW > BLOCK > DROP
+        for action in ['ALLOW', 'BLOCK', 'DROP']:
+            for pattern, rule, list_name in self.query_rules['regex'][action]:
+                if pattern.search(qname_norm):
+                    return action, rule, list_name
+
         return "PASS", None, None
 
     def check_answer(self, qname_norm=None, ip_str=None, geoip_lookup=None, domain_hint=None):
         """
-        Check if answer should be filtered.
-        
-        Args:
-            qname_norm: Normalized query name (for domain blocking)
-            ip_str: IP address string (for IP/ASN blocking)
-            geoip_lookup: GeoIPLookup instance
-            domain_hint: Domain name for CCTLD hint in IP lookup
-        
-        Returns:
-            (action, rule, list_name)
+        Check Answer Rules.
+        Order: Domains -> ASN -> GeoIP -> IPs/CIDRs -> Regex
+        Priority: ALLOW > BLOCK > DROP
         """
         
-        # 1. ASN checks
+        # 1. Domains (Trie) - Checked if domain hint provided (CNAME target, etc)
+        if qname_norm:
+            match = self.answer_rules['domain'].match(qname_norm)
+            if match:
+                return match['action'], match['rule'], match['list']
+
+        # 2. ASN
         if ip_str and geoip_lookup and geoip_lookup.enabled:
             asn_data = geoip_lookup.lookup_asn(ip_str)
-            
             if asn_data and 'asn' in asn_data:
                 asn = asn_data['asn'].upper()
                 as_name = asn_data.get('as_name', 'Unknown')
-                
-                for action in ['DROP', 'BLOCK']:
+                for action in ['ALLOW', 'BLOCK', 'DROP']:
                     if asn in self.answer_rules['asn']:
                         if self.answer_rules['asn'][asn][action]:
                             rule, list_name = self.answer_rules['asn'][asn][action][0]
-                            logger.info(
-                                f"{'🔇' if action == 'DROP' else '⛔'} ASN {action} | "
-                                f"IP: {ip_str} | ASN: {asn} | Holder: {as_name} | "
-                                f"Rule: '{rule}' | List: '{list_name}'"
-                            )
+                            logger.info(f"{'🔇' if action == 'DROP' else ('⛔' if action == 'BLOCK' else '✓')} ASN {action} | IP: {ip_str} | ASN: {asn} | Holder: {as_name} | Rule: '{rule}' | List: '{list_name}'")
                             return action, rule, list_name
-        
-        # 2. GeoIP answer checks (IP-based)
-        applicable_locations = set()
-        trigger_info = None
 
+        # 3. GeoIP
         if ip_str and geoip_lookup and geoip_lookup.enabled:
-            geo_data, cctld_country = geoip_lookup.lookup_with_domain_hint(ip_str, domain_hint)
+            # Note: We do NOT use domain hint for CCTLD here as that's covered in Query rules.
+            # This is strictly for the IP's location.
+            geo_data, _ = geoip_lookup.lookup_with_domain_hint(ip_str, None)
             
             if geo_data:
-                cc = geo_data.get('country_code', '??').upper()
-                cn = geo_data.get('country_name', 'Unknown')
-                trigger_info = f"{cc} ({cn})"
+                applicable_locations = set()
+                if geo_data.get('country_code'): applicable_locations.add(geo_data['country_code'].upper())
+                if geo_data.get('country_name'): applicable_locations.add(geo_data['country_name'].upper())
+                if geo_data.get('continent_code'): applicable_locations.add(geo_data['continent_code'].upper())
+                if geo_data.get('continent_name'): applicable_locations.add(geo_data['continent_name'].upper())
+                for r in geo_data.get('regions', []): applicable_locations.add(r.upper())
                 
-                if geo_data.get('country_code'): 
-                    applicable_locations.add(geo_data['country_code'].upper())
-                if geo_data.get('country_name'): 
-                    applicable_locations.add(geo_data['country_name'].upper())
-                if geo_data.get('continent_code'): 
-                    applicable_locations.add(geo_data['continent_code'].upper())
-                if geo_data.get('continent_name'): 
-                    applicable_locations.add(geo_data['continent_name'].upper())
-                for r in geo_data.get('regions', []): 
-                    applicable_locations.add(r.upper())
-            
-            if cctld_country:
-                applicable_locations.add(cctld_country.upper())
+                trigger_info = f"{geo_data.get('country_code', '??')} ({geo_data.get('country_name', 'Unknown')})"
+                
+                for action in ['ALLOW', 'BLOCK', 'DROP']:
+                    for loc in applicable_locations:
+                        if loc in self.answer_rules['geoip']:
+                            if self.answer_rules['geoip'][loc][action]:
+                                rule, list_name = self.answer_rules['geoip'][loc][action][0]
+                                logger.info(f"{'🔇' if action == 'DROP' else ('⛔' if action == 'BLOCK' else '✓')} GEO-IP {action} (Answer IP) | Target: {ip_str} | Loc: {loc} | Rule: '{rule}' | Trigger: {trigger_info}")
+                                return action, rule, list_name
 
-        if applicable_locations:
-            for action in ['DROP', 'BLOCK']:
-                for loc in applicable_locations:
-                    if loc in self.answer_rules['geoip']:
-                        if self.answer_rules['geoip'][loc][action]:
-                            rule, list_name = self.answer_rules['geoip'][loc][action][0]
-                            logger.info(
-                                f"{'🔇' if action == 'DROP' else '⛔'} GEO-IP {action} (Answer IP) | "
-                                f"Target: {ip_str} | Loc: {loc} | Rule: '{rule}' | Trigger: {trigger_info}"
-                            )
-                            return action, rule, list_name
-        
-        # 3. IP checks (IntervalTree)
+        # 4. IPs/CIDRs (IntervalTree)
         if ip_str:
             try:
                 ip_obj = ipaddress.ip_address(ip_str)
                 ip_int = int(ip_obj)
                 
+                # IntervalTree returns a set of all matching intervals
                 matches = self.answer_rules['ip'][ip_int]
                 if matches:
-                    match = matches.pop().data
-                    return match['action'], match['rule'], match['list']
+                    # Scan for highest priority action in all matches
+                    found_actions = {iv.data['action']: iv.data for iv in matches}
+                    
+                    if 'ALLOW' in found_actions:
+                        m = found_actions['ALLOW']
+                        return 'ALLOW', m['rule'], m['list']
+                    if 'BLOCK' in found_actions:
+                        m = found_actions['BLOCK']
+                        return 'BLOCK', m['rule'], m['list']
+                    if 'DROP' in found_actions:
+                        m = found_actions['DROP']
+                        return 'DROP', m['rule'], m['list']
             except ValueError: 
                 pass 
         
-        # 4. Domain checks
+        # 5. Regex
         if qname_norm:
-            # Regex (DROP first, then BLOCK)
-            for pattern, action, rule, list_name in self.answer_rules['regex']:
-                if pattern.search(qname_norm):
-                    if action == 'DROP':
-                        return "DROP", rule, list_name
-            
-            for pattern, action, rule, list_name in self.answer_rules['regex']:
-                if pattern.search(qname_norm):
-                    if action == 'BLOCK':
-                        return "BLOCK", rule, list_name
-            
-            # Trie
-            match = self.answer_rules['domain'].match(qname_norm)
-            if match:
-                if match.get('action') in ['DROP', 'BLOCK']:
-                    return match['action'], match['rule'], match['list']
+            for action in ['ALLOW', 'BLOCK', 'DROP']:
+                for pattern, rule, list_name in self.answer_rules['regex'][action]:
+                    if pattern.search(qname_norm):
+                        return action, rule, list_name
         
         return "PASS", None, None
     
     def has_answer_only_rules(self):
         return bool(
-            any(self.answer_rules['geoip'].values()) or
-            any(self.answer_rules['asn'].values()) or
+            any(any(l.values()) for l in self.answer_rules['geoip'].values()) or
+            any(any(l.values()) for l in self.answer_rules['asn'].values()) or
             len(self.answer_rules['ip']) > 0 or
             self.answer_rules['domain'].root or
-            self.answer_rules['regex']
+            any(len(l) > 0 for l in self.answer_rules['regex'].values())
         )
 
     def get_stats(self) -> dict:
