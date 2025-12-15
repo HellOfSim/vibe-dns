@@ -417,10 +417,15 @@ class DNSHandler:
         
         return default_policy, "Policy Assignment"
 
-    def create_block_response(self, request: dns.message.Message, qname_obj, qtype) -> dns.message.Message:
+    def create_block_response(self, request: dns.message.Message, qname_obj, qtype, force_rcode=None) -> dns.message.Message:
         reply = dns.message.make_response(request)
-        reply.set_rcode(self.block_rcode)
         
+        if force_rcode is not None:
+            reply.set_rcode(force_rcode)
+            return reply
+        else:
+            reply.set_rcode(self.block_rcode)
+
         inject_ip = None
         if self.block_ip_opt and qtype in [dns.rdatatype.A, dns.rdatatype.AAAA]:
             if self.block_ip_opt == "NULL":
@@ -703,7 +708,13 @@ class DNSHandler:
                 action_type, reason, _ = engine.check_type(qtype)
                 if action_type == "BLOCK":
                     req_logger.info(f"⛔ BLOCKED | Reason: Query Type Filter | Type: {dns.rdatatype.to_text(qtype)} | Details: {reason}")
-                    return self.create_block_response(request, q.name, qtype).to_wire()
+                    
+                    # Custom Logic: AAAA = NOERROR (Empty), Others = NXDOMAIN
+                    target_rcode = dns.rcode.NXDOMAIN
+                    if qtype == dns.rdatatype.AAAA:
+                        target_rcode = dns.rcode.NOERROR
+                        
+                    return self.create_block_response(request, q.name, qtype, force_rcode=target_rcode).to_wire()
                 elif action_type == "DROP":
                     req_logger.info(f"🔇 DROPPED | Reason: Query Type Filter | Type: {dns.rdatatype.to_text(qtype)} | Details: {reason}")
                     return None
