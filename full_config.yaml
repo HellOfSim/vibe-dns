@@ -289,6 +289,13 @@ heuristics:
   # If file not found, uses built-in defaults.
   typosquat_file: "typosquat_targets.txt"
 
+  # Entropy Thresholds (Shannon Entropy 0.0 - 6.0+)
+  # Controls how "random" a domain needs to be to trigger alerts.
+  # Higher = Less sensitive (fewer false positives)
+  # Lower  = More sensitive (more blocks)
+  entropy_threshold_high: 3.8       # Adds 3 points (Likely DGA)
+  entropy_threshold_suspicious: 3.2 # Adds 1 point  (Unusual)
+
 # =============================================================================
 # 9. CLIENT GROUPS
 # found in: server.py, resolver.py

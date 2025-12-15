@@ -75,7 +75,9 @@ DEFAULT_CONFIG = {
     'heuristics': {
         'enabled': False,
         'block_threshold': 4,
-        'typosquat_file': 'typosquat_targets.list'
+        'typosquat_file': 'typosquat_targets.list',
+        'entropy_threshold_high': 3.8,
+        'entropy_threshold_suspicious': 3.2
     },
     'logging': {
         'level': 'INFO',

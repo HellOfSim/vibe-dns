@@ -932,7 +932,6 @@ class ConfigValidator:
             if not isinstance(threshold, int) or not (1 <= threshold <= 5):
                 self.errors.append(f"heuristics.block_threshold: Must be integer between 1 and 5, got {threshold}")
 
-        # NEW: Validate typosquat file
         ts_file = heur_cfg.get('typosquat_file')
         if ts_file:
             if not isinstance(ts_file, str):
@@ -940,7 +939,19 @@ class ConfigValidator:
             elif heur_cfg.get('enabled', False) and not os.path.isfile(ts_file):
                 self.warnings.append(f"heuristics.typosquat_file: File '{ts_file}' not found. Using defaults only.")
 
+        # NEW: Validate Entropy Thresholds
+        e_high = heur_cfg.get('entropy_threshold_high')
+        e_susp = heur_cfg.get('entropy_threshold_suspicious')
 
+        if e_high is not None and not isinstance(e_high, (int, float)):
+             self.errors.append("heuristics.entropy_threshold_high: Must be a number")
+        
+        if e_susp is not None and not isinstance(e_susp, (int, float)):
+             self.errors.append("heuristics.entropy_threshold_suspicious: Must be a number")
+
+        if isinstance(e_high, (int, float)) and isinstance(e_susp, (int, float)):
+            if e_high <= e_susp:
+                self.errors.append("heuristics: entropy_threshold_high must be greater than entropy_threshold_suspicious")
 
 def validate_config(config: Dict[str, Any]) -> Tuple[bool, List[str], List[str]]:
     """

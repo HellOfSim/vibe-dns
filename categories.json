@@ -163,7 +163,7 @@
       "account", "action", "alert", "auth", "billing", "confirm", "credential", 
       "customer", "help", "info", "login", "notification", "password", 
       "recover", "required", "secure", "security", "service", "signin", 
-      "support", "update", "verify", "wallet"
+      "support", "update", "user", "verify", "wallet"
     ],
     "regex": [
       "/(^|\\.)login-[a-z]+-secure\\./",
