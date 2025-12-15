@@ -12,6 +12,7 @@ DEFAULT_CONFIG = {
     'server': {
         'port_udp': [53],
         'port_tcp': [53],
+        'udp_concurrency': 1000,
         'use_ecs': True,
         'use_edns_mac': True,
         'forward_ecs_mode': 'none',

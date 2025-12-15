@@ -2,7 +2,7 @@
 # filename: resolver.py
 # -----------------------------------------------------------------------------
 # Project: Filtering DNS Server (Refactored)
-# Version: 7.7.0 (Short-Circuit Logic + PTR Check)
+# Version: 7.8.0 (Short-Circuit Logic + PTR Check + CNAME Fix)
 # -----------------------------------------------------------------------------
 """
 Core DNS Resolution logic.
@@ -836,7 +836,9 @@ class DNSHandler:
                         for rdata in rrset:
                             ip_text = rdata.to_text()
                             # Priority checked inside check_answer
-                            rrset_action, rrset_rule, rrset_list = engine.check_answer(None, ip_text, self.geoip, domain_hint=qname_norm)
+                            rrset_action, rrset_rule, rrset_list = engine.check_answer(
+                                None, ip_text, self.geoip, domain_hint=qname_norm, check_query_rules=self.match_answers_globally
+                            )
                             
                             if rrset_action != "PASS":
                                 req_logger.debug(f"DEBUG: Answer Match (IP) -> Action: {rrset_action} | IP: {ip_text} | Rule: '{rrset_rule}'")
@@ -849,7 +851,9 @@ class DNSHandler:
                     elif rrset.rdtype in [dns.rdatatype.CNAME, dns.rdatatype.MX, dns.rdatatype.PTR]:
                         for rdata in rrset:
                             target_norm = normalize_domain(str(rdata.target))
-                            rrset_action, rrset_rule, rrset_list = engine.check_answer(target_norm, None, self.geoip)
+                            rrset_action, rrset_rule, rrset_list = engine.check_answer(
+                                target_norm, None, self.geoip, check_query_rules=self.match_answers_globally
+                            )
                             
                             if rrset_action != "PASS":
                                 req_logger.debug(f"DEBUG: Answer Match (Domain) -> Action: {rrset_action} | Domain: {target_norm} | Rule: '{rrset_rule}'")

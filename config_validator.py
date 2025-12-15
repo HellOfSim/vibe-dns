@@ -174,6 +174,12 @@ class ConfigValidator:
                         if not isinstance(port, int) or port < 1 or port > 65535:
                             self.errors.append(f"server.{port_key}: Invalid port {port}")
 
+        # Check concurrency
+        udp_concurrency = server_cfg.get('udp_concurrency')
+        if udp_concurrency is not None:
+            if not isinstance(udp_concurrency, int) or udp_concurrency < 1:
+                self.errors.append(f"server.udp_concurrency: Must be integer >= 1, got {udp_concurrency}")
+
         # Check ECS masks
         for mask_key, max_val in [('ecs_mask_ipv4', 32), ('ecs_mask_ipv6', 128)]:
             val = server_cfg.get(mask_key)

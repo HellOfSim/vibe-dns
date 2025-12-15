@@ -2,7 +2,7 @@
 # filename: filtering.py
 # -----------------------------------------------------------------------------
 # Project: Filtering DNS Server
-# Version: 9.3.1 (Extended Logging)
+# Version: 9.4.0 (Fixed CNAME Logic)
 # -----------------------------------------------------------------------------
 """
 Filtering Engine with strict rule ordering and action prioritization.
@@ -352,7 +352,7 @@ class RuleEngine:
 
         return "PASS", None, None
 
-    def check_answer(self, qname_norm=None, ip_str=None, geoip_lookup=None, domain_hint=None):
+    def check_answer(self, qname_norm=None, ip_str=None, geoip_lookup=None, domain_hint=None, check_query_rules=False):
         """
         Check Answer Rules.
         Order: Domains -> ASN -> GeoIP -> IPs/CIDRs -> Regex
@@ -361,7 +361,13 @@ class RuleEngine:
         
         # 1. Domains (Trie) - Checked if domain hint provided (CNAME target, etc)
         if qname_norm:
+            # Check explicit answer rules first
             match = self.answer_rules['domain'].match(qname_norm)
+            
+            # If enabled, check standard query rules (Blocklists) against the Answer domain (CNAME target)
+            if not match and check_query_rules:
+                match = self.query_rules['domain'].match(qname_norm)
+            
             if match:
                 logger.debug(f"Answer Domain Match: {qname_norm} -> {match['action']} (Rule: {match['rule']})")
                 return match['action'], match['rule'], match['list']

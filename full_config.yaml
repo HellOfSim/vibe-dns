@@ -42,6 +42,10 @@ server:
   # Ports to listen on (List of integers). Standard is 53.
   port_udp: [53, 5353, 53053]
   port_tcp: [53, 5353, 53053]
+
+  # Max concurrent UDP requests to process simultaneously.
+  # Packets exceeding this limit are dropped to prevent resource exhaustion.
+  udp_concurrency: 1000
   
   # --- EDNS Client Subnet (ECS) Handling ---
   # Enable parsing of ECS data from incoming clients
