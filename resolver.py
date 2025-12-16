@@ -748,7 +748,7 @@ class DNSHandler:
                              req_logger.debug(f"DEBUG: Category '{cat}' match ({score}%) -> Below Min Confidence ({rule.get('min_confidence', 0)}%)")
 
             if not is_explicit_allow:
-                h_action, h_reason, h_score = engine.check_heuristics(qname_norm)
+                h_action, h_reason, h_score = engine.check_heuristics(qname_norm, qtype)
                 if h_action == "BLOCK":
                     req_logger.info(f"⛔ BLOCKED | Reason: Heuristics | Domain: {qname_norm} | Score: {h_score}/5 | Details: {h_reason}")
                     self.decision_cache.put_decision(qname_norm, qtype, group_key, policy_name, {'action': 'BLOCK', 'reason': 'Heuristics', 'rule': f"Score {h_score}", 'list': 'Heuristics'})

@@ -220,24 +220,29 @@ class RuleEngine:
             return "BLOCK", f"Type {qtype_name} IS in blocked list", "PolicyTypeFilter"
         return "PASS", None, None
 
-    def check_heuristics(self, qname_norm: str) -> tuple:
+    def check_heuristics(self, qname_norm: str, qtype: int = None) -> tuple:
         """
         Check domain against heuristic analysis.
         Returns: (Action, Reason, Score)
         """
         if not self.heuristics.enabled:
             return "PASS", None, 0
-            
-        score, reasons = self.heuristics.analyze(qname_norm)
+    
+        # Convert qtype int to string for heuristics
+        qtype_str = None
+        if qtype is not None:
+            try:
+                qtype_str = dns.rdatatype.to_text(qtype)
+            except:
+                pass
         
-        # Format reasons for logging
+        score, reasons = self.heuristics.analyze(qname_norm, qtype_str)
+    
         reason_str = ", ".join(reasons) if reasons else "Clean"
-        
+    
         if score >= self.heuristics.block_threshold:
-            # Action, Reason (for log), Score
             return "BLOCK", reason_str, score
-            
-        # Return PASS but keep the reason_str/score for logging purposes
+        
         return "PASS", reason_str, score
 
     def add_rule(self, rule_text, action='BLOCK', list_name="Unknown"):
