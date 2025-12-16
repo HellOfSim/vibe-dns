@@ -2,7 +2,7 @@
 # filename: geoip_compiler.py
 # -----------------------------------------------------------------------------
 # Project: Filtering DNS Server
-# Version: 8.1.0 (ASN Support with Validation)
+# Version: 8.2.0 (Memory-Efficient Mode + Optimizations)
 # -----------------------------------------------------------------------------
 """
 Unified compiler for GeoIP databases with ASN support and validation.
@@ -17,6 +17,7 @@ import logging
 import sys
 import socket
 import orjson as json
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Set
 from collections import defaultdict
@@ -216,24 +217,33 @@ class GeoNamesCompiler:
 # ============================================================================
 
 class UnifiedGeoIPCompiler:
-    def __init__(self, source_path: str, source_type: str, geo_compiler: GeoNamesCompiler, ip_versions: str = 'both'):
+    def __init__(self, source_path: str, source_type: str, geo_compiler: GeoNamesCompiler, 
+                 ip_versions: str = 'both', memory_efficient: bool = False):
         self.source_path = Path(source_path)
         self.source_type = source_type
         self.ip_versions = ip_versions.lower()
-        self.ip_ranges = {}
+        self.memory_efficient = memory_efficient
+        
+        # Memory-efficient mode: stream to temp file instead of dict
+        if memory_efficient:
+            self._temp_file = tempfile.NamedTemporaryFile(mode='w+b', delete=False, suffix='.tmp')
+            self._temp_path = self._temp_file.name
+            self.ip_ranges = None
+            self._region_cache = None
+        else:
+            self.ip_ranges = {}
+            self._region_cache = {}
+            self._temp_file = None
         
         self.region_map = geo_compiler.region_map
         self.continent_map = geo_compiler.continent_map
         self.country_infos = geo_compiler.countries
         self.country_names = {c: d['name'] for c, d in geo_compiler.countries.items()}
         
-        # Create map for continent codes to names
         self.continent_names = {
             code: info['name'] 
             for code, info in CONTINENTS.items()
         }
-        
-        self._region_cache = {}
 
     def extract(self):
         if self.source_type == 'json':
@@ -246,11 +256,13 @@ class UnifiedGeoIPCompiler:
         if not self.source_path.exists():
             logger.error("File not found")
             sys.exit(1)
+        
         count = 0
         last_log = time.time()
+        
         with open(self.source_path, 'rb') as f:
             for line in f:
-                if not line: 
+                if not line.strip(): 
                     continue
                 try:
                     record = json.loads(line)
@@ -258,11 +270,9 @@ class UnifiedGeoIPCompiler:
                     if not network: 
                         continue
                     
-                    # Extract ASN data with validation
                     asn_value = record.get('asn')
                     as_name = record.get('as_name')
                     
-                    # Validate ASN format
                     valid_asn = None
                     valid_as_name = None
                     
@@ -285,13 +295,18 @@ class UnifiedGeoIPCompiler:
                         'continent': record.get('continent_code'),
                     }
                     
-                    # Only add ASN if valid
                     if valid_asn:
                         entry['asn'] = valid_asn
                         if valid_as_name:
                             entry['as_name'] = valid_as_name
                     
-                    self.ip_ranges[network] = entry
+                    if self.memory_efficient:
+                        # Write directly to temp file as binary record
+                        record_bytes = json.dumps({'cidr': network, 'info': entry})
+                        self._temp_file.write(record_bytes + b'\n')
+                    else:
+                        self.ip_ranges[network] = entry
+                    
                     count += 1
                     
                     if count % 100000 == 0:
@@ -302,21 +317,26 @@ class UnifiedGeoIPCompiler:
                             last_log = now
                 except Exception: 
                     continue
+        
         sys.stdout.write(f"\r     Parsed {count:,} records... Done.\n")
+        
+        if self.memory_efficient:
+            self._temp_file.flush()
 
     def _extract_mmdb(self):
         import maxminddb
         import ipaddress
         
-        logger.info("  🔍 Extracting IP ranges from MMDB (Smart Traversal)...")
+        logger.info("  🔍 Extracting IP ranges from MMDB...")
         if not self.source_path.exists():
             logger.error("File not found")
             sys.exit(1)
+        
         reader = maxminddb.open_database(str(self.source_path))
         count = 0
         last_log = time.time()
         
-        # IPv4
+        # Optimized IPv4 traversal
         ip_int = 0
         max_val = 2**32
         while ip_int < max_val:
@@ -326,19 +346,25 @@ class UnifiedGeoIPCompiler:
             except ValueError:
                 prefix = 32
                 record = None
+            
             if record:
                 self._process_mmdb_record(f"{ip_str}/{prefix}", record)
                 count += 1
+                
+                if count % 20000 == 0:
+                    now = time.time()
+                    if now - last_log > 1.0:
+                        sys.stdout.write(f"\r     Extracted {count:,} records...")
+                        sys.stdout.flush()
+                        last_log = now
+            
             ip_int += 1 << (32 - prefix)
-            if count % 20000 == 0:
-                now = time.time()
-                if now - last_log > 1.0:
-                    sys.stdout.write(f"\r     Extracted {count:,} records...")
-                    sys.stdout.flush()
-                    last_log = now
         
         sys.stdout.write(f"\r     Extracted {count:,} records... Done.\n")
         reader.close()
+        
+        if self.memory_efficient:
+            self._temp_file.flush()
 
     def _process_mmdb_record(self, cidr, data):
         country = None
@@ -355,21 +381,17 @@ class UnifiedGeoIPCompiler:
         if 'continent' in data:
             continent = data['continent'].get('code')
 
-        # Extract and validate ASN data
         asn_num = None
         as_name = None
         
         if 'autonomous_system_number' in data:
             asn_raw = data['autonomous_system_number']
-            # Validate it's actually a number
             if isinstance(asn_raw, int) and asn_raw > 0:
                 asn_num = f"AS{asn_raw}"
                 
         if 'autonomous_system_organization' in data and asn_num:
-            # Only store AS name if we have a valid ASN
             as_name = data['autonomous_system_organization']
 
-        # Only create entry if we have country or valid ASN
         if country or asn_num:
             entry = {
                 'country': country,
@@ -378,16 +400,24 @@ class UnifiedGeoIPCompiler:
                 'continent': continent
             }
             
-            # Add ASN data only if validated
             if asn_num:
                 entry['asn'] = asn_num
                 if as_name:
                     entry['as_name'] = as_name
             
-            # Remove None values
-            self.ip_ranges[cidr] = {k: v for k, v in entry.items() if v is not None}
+            entry = {k: v for k, v in entry.items() if v is not None}
+            
+            if self.memory_efficient:
+                record_bytes = json.dumps({'cidr': cidr, 'info': entry})
+                self._temp_file.write(record_bytes + b'\n')
+            else:
+                self.ip_ranges[cidr] = entry
 
     def _compute_regions_cached(self, info):
+        if self.memory_efficient:
+            # No caching in memory-efficient mode
+            return self._compute_regions_nocache(info)
+        
         key = (
             info.get('country'), 
             info.get('continent'), 
@@ -395,22 +425,24 @@ class UnifiedGeoIPCompiler:
             info.get('region'), 
             info.get('region_code')
         )
+        
         if key in self._region_cache: 
             return self._region_cache[key]
         
+        result = self._compute_regions_nocache(info)
+        self._region_cache[key] = result
+        return result
+    
+    def _compute_regions_nocache(self, info):
         regions = set()
         cc = info.get('country')
-        reg_code = info.get('region_code')
 
         if cc:
-            # Country code itself
             regions.add(cc.upper())
             
-            # Country name
             if cc in self.country_names: 
                 regions.add(self.country_names[cc].upper())
             
-            # Continent tags
             continent_code = get_country_continent(cc)
             if continent_code:
                 regions.add(continent_code.upper())
@@ -418,7 +450,6 @@ class UnifiedGeoIPCompiler:
                 if continent_name:
                     regions.add(continent_name.upper())
             
-            # Custom region tags
             country_regions = get_country_regions(cc)
             for region_name in country_regions:
                 regions.add(region_name.upper())
@@ -432,12 +463,16 @@ class UnifiedGeoIPCompiler:
         if info.get('continent'): 
             regions.add(info['continent'].upper())
         
-        result = list(regions)
-        self._region_cache[key] = result
-        return result
+        return list(regions)
 
     def _save_binary(self, output_path: str):
-        logger.info(f"  💾 Processing {len(self.ip_ranges)} ranges for binary output...")
+        if self.memory_efficient:
+            self._save_binary_streaming(output_path)
+        else:
+            self._save_binary_inmemory(output_path)
+
+    def _save_binary_inmemory(self, output_path: str):
+        logger.info(f"  💾 Processing {len(self.ip_ranges)} ranges...")
         ipv4_list, ipv6_list = [], []
         count = 0
         asn_count = 0
@@ -445,10 +480,10 @@ class UnifiedGeoIPCompiler:
         
         for cidr, info in self.ip_ranges.items():
             count += 1
-            if count % 100000 == 0:
+            if count % 50000 == 0:
                 now = time.time()
                 if now - last_log > 1.0:
-                    sys.stdout.write(f"\r     Processing record {count:,}/{len(self.ip_ranges):,}...")
+                    sys.stdout.write(f"\r     Processing {count:,}/{len(self.ip_ranges):,}...")
                     sys.stdout.flush()
                     last_log = now
             
@@ -461,7 +496,6 @@ class UnifiedGeoIPCompiler:
             cc = info.get('country')
             cont_code = info.get('continent')
 
-            # Fallback to GeoNames for continent if missing in MMDB
             if not cont_code and cc:
                 cont_code = get_country_continent(cc)
 
@@ -478,7 +512,6 @@ class UnifiedGeoIPCompiler:
                 'region_code': info.get('region_code')
             }
             
-            # Only add ASN if it exists and is in correct format
             if 'asn' in info:
                 asn_value = info['asn']
                 if asn_value and isinstance(asn_value, str) and asn_value.startswith('AS'):
@@ -487,7 +520,6 @@ class UnifiedGeoIPCompiler:
                     if 'as_name' in info:
                         clean_info['as_name'] = info['as_name']
             
-            # Remove None values
             clean_info = {k: v for k, v in clean_info.items() if v is not None}
             
             if ver == 4: 
@@ -495,12 +527,97 @@ class UnifiedGeoIPCompiler:
             elif ver == 6: 
                 ipv6_list.append((start, end, clean_info))
         
-        sys.stdout.write(f"\r     Processing record {count:,}/{len(self.ip_ranges):,}... Done.\n")
-        logger.info(f"     Found {asn_count} ranges with valid ASN data")
-        logger.info("     Sorting IP ranges...")
+        sys.stdout.write(f"\r     Processing {count:,}... Done.\n")
+        logger.info(f"     ASN records: {asn_count}")
+        
+        self._write_binary_file(output_path, ipv4_list, ipv6_list)
+
+    def _save_binary_streaming(self, output_path: str):
+        logger.info("  💾 Processing ranges (streaming mode)...")
+        
+        # Close write handle, reopen for reading
+        self._temp_file.close()
+        
+        ipv4_list, ipv6_list = [], []
+        count = 0
+        asn_count = 0
+        last_log = time.time()
+        
+        with open(self._temp_path, 'rb') as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                
+                try:
+                    record = json.loads(line)
+                    cidr = record['cidr']
+                    info = record['info']
+                    
+                    count += 1
+                    if count % 50000 == 0:
+                        now = time.time()
+                        if now - last_log > 1.0:
+                            sys.stdout.write(f"\r     Processing {count:,}...")
+                            sys.stdout.flush()
+                            last_log = now
+                    
+                    ver, start, end = parse_cidr_fast(cidr)
+                    if ver == 0: 
+                        continue
+                    
+                    regions = self._compute_regions_nocache(info)
+                    
+                    cc = info.get('country')
+                    cont_code = info.get('continent')
+
+                    if not cont_code and cc:
+                        cont_code = get_country_continent(cc)
+
+                    cont_name = None
+                    if cont_code:
+                        cont_name = get_continent_name(cont_code)
+                    
+                    clean_info = {
+                        'country_code': cc,
+                        'country_name': info.get('country_name'),
+                        'continent_code': cont_code,
+                        'continent_name': cont_name,
+                        'regions': regions,
+                        'region_code': info.get('region_code')
+                    }
+                    
+                    if 'asn' in info:
+                        asn_value = info['asn']
+                        if asn_value and isinstance(asn_value, str) and asn_value.startswith('AS'):
+                            clean_info['asn'] = asn_value
+                            asn_count += 1
+                            if 'as_name' in info:
+                                clean_info['as_name'] = info['as_name']
+                    
+                    clean_info = {k: v for k, v in clean_info.items() if v is not None}
+                    
+                    if ver == 4: 
+                        ipv4_list.append((start, end, clean_info))
+                    elif ver == 6: 
+                        ipv6_list.append((start, end, clean_info))
+                        
+                except Exception:
+                    continue
+        
+        sys.stdout.write(f"\r     Processing {count:,}... Done.\n")
+        logger.info(f"     ASN records: {asn_count}")
+        
+        # Cleanup temp file
+        os.unlink(self._temp_path)
+        
+        self._write_binary_file(output_path, ipv4_list, ipv6_list)
+
+    def _write_binary_file(self, output_path: str, ipv4_list: list, ipv6_list: list):
+        logger.info("     Sorting ranges...")
         ipv4_list.sort(key=lambda x: x[0])
         ipv6_list.sort(key=lambda x: x[0])
-        logger.info("     Writing binary file...")
+        
+        logger.info("     Building binary...")
         
         data_cache = {}
         data_buffer = bytearray()
@@ -532,39 +649,47 @@ class UnifiedGeoIPCompiler:
             e_bytes = end.to_bytes(16, 'big')
             ipv6_index.extend(ipv6_struct.pack(s_bytes, e_bytes, offset))
 
-        header = struct.pack('!4sHIIIII6s', b'VIBE', 1, len(ipv4_list), 32, len(ipv6_list), 32 + len(ipv4_index), 32 + len(ipv4_index) + len(ipv6_index), b'\x00'*6)
+        header = struct.pack('!4sHIIIII6s', 
+            b'VIBE', 1, 
+            len(ipv4_list), 32, 
+            len(ipv6_list), 32 + len(ipv4_index), 
+            32 + len(ipv4_index) + len(ipv6_index), 
+            b'\x00'*6)
+        
         with open(output_path, 'wb') as f:
             f.write(header)
             f.write(ipv4_index)
             f.write(ipv6_index)
             f.write(data_buffer)
+        
         size_mb = os.path.getsize(output_path) / (1024*1024)
-        logger.info(f"  ✓ Finished! Database size: {size_mb:.2f} MB")
+        logger.info(f"  ✓ Complete! Size: {size_mb:.2f} MB")
 
     def export_asn_tsv(self, output_path: str):
-        """Export ASN data in IPASN format: CIDR<TAB>ASN<TAB>AS-NAME (aggregated)"""
         logger.info(f"📝 Exporting ASN data to {output_path}")
-    
-        # Aggregate CIDRs per ASN
+        
+        if self.memory_efficient:
+            self._export_asn_streaming(output_path)
+        else:
+            self._export_asn_inmemory(output_path)
+
+    def _export_asn_inmemory(self, output_path: str):
         asn_data = defaultdict(lambda: {'cidrs': [], 'as_name': ''})
-    
+        
         for cidr, info in self.ip_ranges.items():
             if 'asn' in info:
                 asn_value = info['asn']
                 if asn_value and isinstance(asn_value, str) and asn_value.startswith('AS'):
-                    # Strip "AS" prefix
                     asn_num = asn_value[2:]
                     as_name = info.get('as_name', '')
                 
                     asn_data[asn_num]['cidrs'].append(cidr)
                     if as_name and not asn_data[asn_num]['as_name']:
                         asn_data[asn_num]['as_name'] = as_name
-    
-        # Sort CIDRs within each ASN
+        
         for asn_num in asn_data:
             asn_data[asn_num]['cidrs'].sort(key=lambda x: parse_cidr_fast(x)[1])
-    
-        # Write sorted output
+        
         count = 0
         with open(output_path, 'w', encoding='utf-8') as f:
             for asn_num in sorted(asn_data.keys(), key=int):
@@ -572,8 +697,45 @@ class UnifiedGeoIPCompiler:
                 for cidr in asn_data[asn_num]['cidrs']:
                     f.write(f"{cidr}\t{asn_num}\t{as_name}\n")
                     count += 1
-    
-        logger.info(f"✓ Exported {count} entries for {len(asn_data)} unique ASNs")
+        
+        logger.info(f"✓ Exported {count} entries for {len(asn_data)} ASNs")
+
+    def _export_asn_streaming(self, output_path: str):
+        asn_data = defaultdict(lambda: {'cidrs': [], 'as_name': ''})
+        
+        with open(self._temp_path, 'rb') as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                    cidr = record['cidr']
+                    info = record['info']
+                    
+                    if 'asn' in info:
+                        asn_value = info['asn']
+                        if asn_value and isinstance(asn_value, str) and asn_value.startswith('AS'):
+                            asn_num = asn_value[2:]
+                            as_name = info.get('as_name', '')
+                        
+                            asn_data[asn_num]['cidrs'].append(cidr)
+                            if as_name and not asn_data[asn_num]['as_name']:
+                                asn_data[asn_num]['as_name'] = as_name
+                except Exception:
+                    continue
+        
+        for asn_num in asn_data:
+            asn_data[asn_num]['cidrs'].sort(key=lambda x: parse_cidr_fast(x)[1])
+        
+        count = 0
+        with open(output_path, 'w', encoding='utf-8') as f:
+            for asn_num in sorted(asn_data.keys(), key=int):
+                as_name = asn_data[asn_num]['as_name']
+                for cidr in asn_data[asn_num]['cidrs']:
+                    f.write(f"{cidr}\t{asn_num}\t{as_name}\n")
+                    count += 1
+        
+        logger.info(f"✓ Exported {count} entries for {len(asn_data)} ASNs")
 
     def compile(self, output_path: str = "geoip.vibe"):
         self.extract()
@@ -588,6 +750,8 @@ def main():
     parser.add_argument("--skip-geonames", action="store_true", help="Skip downloading GeoNames")
     parser.add_argument("--export-rules", help="Export rule reference to text file")
     parser.add_argument("--export-asn", help="Export ASN data to TSV file (IPASN format)")
+    parser.add_argument("--memory-efficient", action="store_true", 
+                        help="Use memory-efficient mode (slower but uses less RAM)")
     args = parser.parse_args()
     
     gc = GeoNamesCompiler()
@@ -608,7 +772,7 @@ def main():
 
     source = args.mmdb if args.mmdb else args.json
     stype = 'mmdb' if args.mmdb else 'json'
-    uc = UnifiedGeoIPCompiler(source, stype, gc)
+    uc = UnifiedGeoIPCompiler(source, stype, gc, memory_efficient=args.memory_efficient)
     uc.compile(args.unified_output)
     
     if args.export_asn:
