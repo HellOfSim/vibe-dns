@@ -2,12 +2,12 @@
 # filename: upstream_manager.py
 # -----------------------------------------------------------------------------
 # Project: Filtering DNS Server (Refactored)
-# Version: 7.0.0 (Enhanced Logging)
+# Version: 7.2.0 (Enhanced Bootstrap Logging)
 # -----------------------------------------------------------------------------
 """
 Upstream DNS Server Manager with Priority Support & Strict DoH IP Targeting.
 Includes configurable connection reuse and detailed connection logging.
-Now features auto-retry for stale reused connections.
+Now features configurable bootstrap IP resolution (IPv4/IPv6/Auto) with verbose logging.
 """
 
 import asyncio
@@ -112,6 +112,8 @@ class UpstreamManager:
         self.mode = self.config.get('mode', 'fastest')
         self.raw_bootstrap = self.config.get('bootstrap') or ['86.54.11.1', '9.9.9.9', '1.1.1.2', '8.8.8.8']
         
+        self.bootstrap_resolution_mode = self.config.get('bootstrap_resolution_mode', 'auto').lower()
+        
         self.fallback_enabled = self.config.get('fallback_enabled', False)
         self.monitor_interval = max(1, int(self.config.get('monitor_interval', 60)))
         self.monitor_on_query = self.config.get('monitor_on_query', False)
@@ -164,6 +166,7 @@ class UpstreamManager:
         self._doh_init_lock = asyncio.Lock()
 
         logger.info(f"Initializing UpstreamManager. Strategy: '{self.mode}', Connection Reuse: {self.connection_reuse}")
+        logger.info(f"Bootstrap Resolution Mode: '{self.bootstrap_resolution_mode}'")
         
         self._parse_bootstrap_config(self.raw_bootstrap)
         self.parse_config(self.config)
@@ -305,7 +308,55 @@ class UpstreamManager:
     async def _bootstrap_resolve(self, hostname):
         found_ips = set()
         
-        for qtype in [dns.rdatatype.A, dns.rdatatype.AAAA]:
+        # Determine which query types to use based on mode
+        qtypes = []
+        mode = self.bootstrap_resolution_mode
+        
+        if mode == 'auto':
+            has_v4 = False
+            has_v6 = False
+            v4_count = 0
+            v6_count = 0
+            
+            for bs in self.bootstrappers:
+                try:
+                    ip = ipaddress.ip_address(bs['ip'])
+                    if ip.version == 4:
+                        has_v4 = True
+                        v4_count += 1
+                    elif ip.version == 6:
+                        has_v6 = True
+                        v6_count += 1
+                except ValueError:
+                    pass
+            
+            logger.debug(f"Bootstrap Auto-Detection: Found {v4_count} IPv4 and {v6_count} IPv6 bootstrap servers.")
+
+            if has_v4 and not has_v6:
+                qtypes = [dns.rdatatype.A]
+                logger.info(f"Bootstrap Mode 'auto' -> IPv4 Only (Bootstrap servers are all IPv4)")
+            elif has_v6 and not has_v4:
+                qtypes = [dns.rdatatype.AAAA]
+                logger.info(f"Bootstrap Mode 'auto' -> IPv6 Only (Bootstrap servers are all IPv6)")
+            else:
+                qtypes = [dns.rdatatype.A, dns.rdatatype.AAAA]
+                logger.info(f"Bootstrap Mode 'auto' -> Dual Stack (Mixed or no bootstrap IPs found)")
+        
+        elif mode == 'ipv4':
+            qtypes = [dns.rdatatype.A]
+            logger.debug("Bootstrap Mode: IPv4 Only (Configured)")
+        elif mode == 'ipv6':
+            qtypes = [dns.rdatatype.AAAA]
+            logger.debug("Bootstrap Mode: IPv6 Only (Configured)")
+        elif mode == 'both':
+            qtypes = [dns.rdatatype.A, dns.rdatatype.AAAA]
+            logger.debug("Bootstrap Mode: Dual Stack (Configured)")
+        else:
+            qtypes = [dns.rdatatype.A, dns.rdatatype.AAAA] # Default
+
+        logger.info(f"Resolving upstream host '{hostname}' using mode '{mode}' (Types: {[dns.rdatatype.to_text(t) for t in qtypes]})")
+
+        for qtype in qtypes:
             q = dns.message.make_query(hostname, qtype)
             pkt = q.to_wire()
             
@@ -320,17 +371,23 @@ class UpstreamManager:
                     
                     if data:
                         resp = dns.message.from_wire(data)
+                        found_type_ips = False
                         for rrset in resp.answer:
                             if rrset.rdtype == qtype:
                                 for rdata in rrset:
-                                    found_ips.add(rdata.to_text())
-                        if found_ips:
+                                    ip_txt = rdata.to_text()
+                                    found_ips.add(ip_txt)
+                                    logger.debug(f"  + Resolved {hostname} -> {ip_txt} ({dns.rdatatype.to_text(qtype)}) via {server['ip']}")
+                                    found_type_ips = True
+                        if found_type_ips:
                             break
                 except Exception as e:
                     logger.debug(f"Bootstrap resolve error for {hostname} via {server['ip']}: {e}")
         
-        if not found_ips:
-            logger.error(f"Bootstrap resolution failed for '{hostname}' - tried all bootstrap servers")
+        if found_ips:
+            logger.info(f"Successfully resolved '{hostname}': {list(found_ips)}")
+        else:
+            logger.error(f"Bootstrap resolution failed for '{hostname}' - tried all bootstrap servers (Mode: {mode})")
             
         return list(found_ips)
 

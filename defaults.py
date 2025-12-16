@@ -31,6 +31,7 @@ DEFAULT_CONFIG = {
         'monitor_on_query': True,
         'test_domain': 'www.google.com',
         'bootstrap': ['8.8.8.8', '8.8.4.4'],
+        'bootstrap_resolution_mode': 'auto',
         'circuit_breaker_enabled': True,
         'circuit_failure_threshold': 3,
         'circuit_recovery_timeout': 30,

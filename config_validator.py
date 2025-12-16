@@ -2,7 +2,7 @@
 # filename: config_validator.py
 # -----------------------------------------------------------------------------
 # Project: Filtering DNS Server
-# Version: 3.3.0 (Added Connection Reuse Validation)
+# Version: 3.4.0 (Added Bootstrap Mode Validation)
 # -----------------------------------------------------------------------------
 """
 Configuration Validation Module - Complete coverage for all config options.
@@ -237,6 +237,12 @@ class ConfigValidator:
         mode = upstream_cfg.get('mode', 'fastest')
         if mode not in valid_modes:
             self.errors.append(f"upstream.mode: Invalid mode '{mode}', must be one of {valid_modes}")
+        
+        # Check bootstrap resolution mode
+        valid_boot_modes = ['auto', 'ipv4', 'ipv6', 'both']
+        boot_mode = upstream_cfg.get('bootstrap_resolution_mode', 'auto')
+        if boot_mode.lower() not in valid_boot_modes:
+             self.errors.append(f"upstream.bootstrap_resolution_mode: Invalid mode '{boot_mode}', must be one of {valid_boot_modes}")
 
         # Boolean options
         for bool_key in ['startup_check_enabled', 'fallback_enabled', 'allow_underscores', 

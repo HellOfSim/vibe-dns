@@ -142,6 +142,16 @@ upstream:
     - "8.8.8.8"
     - "1.1.1.1"
 
+  # Control which IP version is resolved for upstream hosts via bootstrap servers.
+  # - ipv4: Only request A records (IPv4).
+  # - ipv6: Only request AAAA records (IPv6).
+  # - both: Request both A and AAAA records (Default).
+  # - auto: Detect based on configured bootstrap IPs. 
+  #         If all bootstrap servers are only IPv4, only request IPv4.
+  #         If all bootstrap servers are only IPv6, only request IPv6.
+  #         If all bootstrap servers are both IPv4 and IPv6, request iIPv4 and IPv6.
+  bootstrap_resolution_mode: "auto"
+
   # Upstream Server Definitions
   # Syntax: protocol://host:port/path#forced_ip
   # Protocols: udp, tcp, tls (DoT), https (DoH)
@@ -476,5 +486,4 @@ assignments:
 
   local_network:
     policy: "LocalDNS"
-
 
