@@ -566,6 +566,13 @@ class ConfigValidator:
         if ptr_check not in valid_ptr_modes:
             self.errors.append(f"filtering.ptr_check: Invalid mode '{ptr_check}', must be one of {valid_ptr_modes}")
 
+        # Check PTR check RCODE
+        valid_rcodes = ['FORMERR', 'SERVFAIL', 'REFUSED', 'NXDOMAIN', 'NOERROR']
+        ptr_check_rcode = filtering_cfg.get('ptr_check_rcode', 'SERVFAIL')
+        if ptr_check_rcode is not None:
+            if not isinstance(ptr_check_rcode, str) or ptr_check_rcode.upper() not in valid_rcodes:
+                self.errors.append(f"filtering.ptr_check_rcode: Invalid RCODE '{ptr_check_rcode}', must be one of {valid_rcodes}")
+
     # =========================================================================
     # CATEGORIZATION OPTIONS
     # =========================================================================
@@ -620,6 +627,14 @@ class ConfigValidator:
         ident_lower = ident.lower().strip()
 
         # Special prefixes
+        if ident_lower.startswith('domain:'):
+            domain_val = ident_lower[7:].strip()
+            if not domain_val:
+                self.errors.append(f"groups.{group_name}: Empty domain selector")
+            elif domain_val.startswith('.'):
+                self.warnings.append(f"groups.{group_name}: domain selector '{domain_val}' has leading dot (will be stripped)")
+            return
+
         if ident_lower.startswith('server_ip:'):
             ip = ident_lower[10:]
             if not is_valid_ip(ip):

@@ -160,6 +160,10 @@ upstream:
         # DoH Example
         - url: "https://dns.google:443/dns-query#8.8.4.4"
 
+    LocalUpstream:
+      servers:
+        - "udp://192.168.1.1:53"  # Local router/DNS
+
 # =============================================================================
 # 5. CACHING
 # found in: cache_stats.py, resolver.py
@@ -274,6 +278,10 @@ filtering:
   # - none:   No validation (Default).
   ptr_check: "none"
 
+  # RCODE to return when ptr_check=strict blocks an invalid PTR query
+  # Options: FORMERR (default), SERVFAIL, REFUSED, NXDOMAIN, NOERROR
+  ptr_check_rcode: "FORMERR"
+
 # --- Heuristics Engine (New) ---
 heuristics:
   # Enable advanced heuristic analysis for suspicious domains
@@ -311,11 +319,19 @@ mac_cache_refresh_interval: 300
 # - GeoIP Tag (geoip:US, geoip:EUROPE) - Matches based on Source IP location
 # - Server Bind IP (server_ip:10.0.0.1) - useful for VLAN gateways listening on specific IPs
 # - Server Port (server_port:5353) - useful for specific listeners
+# - Query Domain (domain:home, domain:local) - Matches query TLD or domain suffix
 groups:
   admin_devices:
     - "10.0.0.5"
     - "AA:BB:CC:DD:EE:FF"
   
+  # Local network domains - forward to local DNS
+  local_domains:
+    - "domain:home"
+    - "domain:local"
+    - "domain:lan"
+    - "domain:internal.corp.com"
+
   iot_vlan:
     # OPTIONAL: Set a default action for this group (ALLOW, BLOCK, DROP)
     # If set, this overrides policies for unhandled domains, effectively acting as a whitelist mode if set to BLOCK.
@@ -434,6 +450,11 @@ policies:
     # Note: To make this strictly whitelist-only, set the Group's 'default_action' to BLOCK
     # or ensure a 'block all' list is applied here.
 
+  # Local DNS
+  LocalDNS:
+    upstream_group: "LocalUpstream"
+
+
 # =============================================================================
 # 13. ASSIGNMENTS
 # found in: resolver.py
@@ -452,4 +473,8 @@ assignments:
     
   admin_devices:
     policy: "Default"
+
+  local_network:
+    policy: "LocalDNS"
+
 

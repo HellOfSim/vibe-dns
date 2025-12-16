@@ -71,7 +71,8 @@ DEFAULT_CONFIG = {
         'ttl_sync_mode': 'none'
     },
     'filtering': {
-        'ptr_check': 'none'
+        'ptr_check': 'none',
+        'ptr_check_rcode': 'FORMERR'
     },
     'heuristics': {
         'enabled': False,

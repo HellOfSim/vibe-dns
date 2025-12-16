@@ -2,12 +2,13 @@
 # filename: upstream_manager.py
 # -----------------------------------------------------------------------------
 # Project: Filtering DNS Server (Refactored)
-# Version: 6.7.0 (Smart Retry for Connection Reuse)
+# Version: 6.8.0 (Fixed Mode Selection Logic)
 # -----------------------------------------------------------------------------
 """
 Upstream DNS Server Manager with Priority Support & Strict DoH IP Targeting.
 Includes configurable connection reuse and detailed connection logging.
 Now features auto-retry for stale reused connections.
+FIXED: All mode selections (random, roundrobin, sticky, none) now work correctly.
 """
 
 import asyncio
@@ -16,7 +17,6 @@ import random
 import ipaddress
 import socket
 import ssl
-import sys
 import re
 from collections import OrderedDict, defaultdict
 from urllib.parse import urlparse
@@ -30,6 +30,7 @@ from utils import get_logger
 
 logger = get_logger("Upstream")
 
+
 def _build_domain_regex(allow_underscores=False):
     if allow_underscores:
         return re.compile(
@@ -40,10 +41,12 @@ def _build_domain_regex(allow_underscores=False):
             r'^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}$'
         )
 
+
 DOH_HEADERS = {
     'Content-Type': 'application/dns-message',
     'Accept': 'application/dns-message'
 }
+
 
 class CircuitBreaker:
     def __init__(self, failure_threshold=3, recovery_timeout=30, half_open_max_calls=1):
@@ -63,7 +66,7 @@ class CircuitBreaker:
             if time.time() - self.last_failure_time > self.recovery_timeout:
                 self.state = 'HALF_OPEN'
                 self.half_open_calls = 0
-                logger.debug(f"Circuit breaker entering HALF_OPEN state")
+                logger.debug("Circuit breaker entering HALF_OPEN state")
                 return True
             return False
         elif self.state == 'HALF_OPEN':
@@ -75,7 +78,7 @@ class CircuitBreaker:
     
     def record_success(self):
         if self.state == 'HALF_OPEN':
-            logger.info(f"Circuit breaker recovery successful, returning to CLOSED state")
+            logger.info("Circuit breaker recovery successful, returning to CLOSED state")
             self.state = 'CLOSED'
             self.failure_count = 0
         elif self.state == 'CLOSED':
@@ -86,16 +89,17 @@ class CircuitBreaker:
         self.last_failure_time = time.time()
         
         if self.state == 'HALF_OPEN':
-            logger.warning(f"Circuit breaker recovery failed, returning to OPEN state")
+            logger.warning("Circuit breaker recovery failed, returning to OPEN state")
             self.state = 'OPEN'
         elif self.failure_count >= self.failure_threshold:
             logger.warning(f"Circuit breaker opening after {self.failure_count} failures")
             self.state = 'OPEN'
 
+
 class UpstreamManager:
     def __init__(self, config):
-        self.servers = [] 
-        self.bootstrappers = [] 
+        self.servers = []
+        self.bootstrappers = []
         self.lb_stats = {}
         self.circuit_breakers: Dict[str, CircuitBreaker] = {}
         self.config = config if isinstance(config, dict) else {}
@@ -123,18 +127,19 @@ class UpstreamManager:
         
         raw_test_domain = self.config.get('test_domain', 'www.google.com')
         if raw_test_domain and isinstance(raw_test_domain, str) and self.domain_regex.match(raw_test_domain):
-             self.test_domain = raw_test_domain
+            self.test_domain = raw_test_domain
         else:
-             self.test_domain = 'www.google.com'
+            self.test_domain = 'www.google.com'
         
         try:
             self.conn_limit = int(self.config.get('connection_limit', 20))
-            if self.conn_limit < 1: self.conn_limit = 20
+            if self.conn_limit < 1:
+                self.conn_limit = 20
         except (ValueError, TypeError):
             self.conn_limit = 20
 
         self.last_monitor_time = 0
-        self._rr_index = 0 
+        self._rr_index = 0
         self._sticky_map = OrderedDict()
         self._sticky_max_size = 10000
         self._last_sticky_cleanup = time.time()
@@ -146,7 +151,6 @@ class UpstreamManager:
         self._stats_lock = asyncio.Lock()
 
         # DoT Connection Pool
-        # Key: (ip, port, hostname) -> Value: (reader, writer)
         self._dot_pool = {}
         self._dot_locks = defaultdict(asyncio.Lock)
 
@@ -172,8 +176,11 @@ class UpstreamManager:
                 'udp://8.8.8.8:53'
             ]}}})
 
+    # =========================================================================
+    # INITIALIZATION & CONFIG
+    # =========================================================================
+
     async def _ensure_doh_client(self):
-        # Only create persistent client if reuse is enabled
         if not self.connection_reuse:
             return
 
@@ -187,7 +194,6 @@ class UpstreamManager:
             try:
                 import httpx
                 
-                # Persistent client for connection reuse
                 self.doh_client = httpx.AsyncClient(
                     http2=True,
                     verify=True,
@@ -206,7 +212,6 @@ class UpstreamManager:
     async def close(self):
         logger.debug("Closing all upstream sessions.")
         
-        # Close persistent DoH client
         if self.doh_client is not None:
             try:
                 await self.doh_client.aclose()
@@ -214,7 +219,6 @@ class UpstreamManager:
             except Exception as e:
                 logger.debug(f"Error closing DoH client: {e}")
         
-        # Close pooled DoT connections
         for key, (reader, writer) in self._dot_pool.items():
             try:
                 writer.close()
@@ -240,16 +244,17 @@ class UpstreamManager:
 
     def _normalize_protocol(self, proto):
         proto = proto.lower()
-        if proto == 'doh': return 'https'
-        if proto == 'dot': return 'tls'
-        if proto == 'tls': return 'tls'
+        if proto == 'doh':
+            return 'https'
+        if proto == 'dot':
+            return 'tls'
         return proto
 
     def _parse_bootstrap_config(self, raw_list):
         self.bootstrappers = []
         valid_protos = {'udp': 53, 'tcp': 53}
 
-        if not raw_list: 
+        if not raw_list:
             logger.warning("No bootstrap servers configured, using defaults")
             return
 
@@ -264,10 +269,10 @@ class UpstreamManager:
                 host = parsed.hostname
                 port = parsed.port
                 
-                if proto not in valid_protos: 
+                if proto not in valid_protos:
                     logger.warning(f"Unsupported bootstrap protocol '{proto}' in '{entry}'")
                     continue
-                if not host: 
+                if not host:
                     logger.warning(f"Missing hostname in bootstrap entry '{entry}'")
                     continue
 
@@ -314,12 +319,12 @@ class UpstreamManager:
                     if data:
                         resp = dns.message.from_wire(data)
                         for rrset in resp.answer:
-                                if rrset.rdtype == qtype:
-                                    for rdata in rrset:
-                                        found_ips.add(rdata.to_text())
-                        if found_ips: 
+                            if rrset.rdtype == qtype:
+                                for rdata in rrset:
+                                    found_ips.add(rdata.to_text())
+                        if found_ips:
                             break
-                except Exception as e: 
+                except Exception as e:
                     logger.debug(f"Bootstrap resolve error for {hostname}: {e}")
         
         if not found_ips:
@@ -328,23 +333,23 @@ class UpstreamManager:
         return list(found_ips)
 
     def parse_config(self, config):
-        if not config: 
+        if not config:
             return
         raw_servers = config.get('servers')
         if isinstance(raw_servers, list):
-             raw_groups = {'Default': {'servers': raw_servers}}
+            raw_groups = {'Default': {'servers': raw_servers}}
         else:
-             raw_groups = config.get('groups') or {}
+            raw_groups = config.get('groups') or {}
              
         self.servers = []
         count = 0
         valid_protos = {'udp': 53, 'tcp': 53, 'https': 443, 'tls': 853}
 
         for group_name, group_data in raw_groups.items():
-            if not group_data: 
+            if not group_data:
                 continue
             s_list = group_data.get('servers', []) if isinstance(group_data, dict) else group_data
-            if not isinstance(s_list, list): 
+            if not isinstance(s_list, list):
                 continue
 
             for s_item in s_list:
@@ -354,7 +359,7 @@ class UpstreamManager:
                 else:
                     s_str = s_item
                     priority = 100
-                
+
                 if not s_str:
                     logger.warning(f"Empty server URL in group '{group_name}', skipping")
                     continue
@@ -374,7 +379,7 @@ class UpstreamManager:
                 if '://' not in s_str:
                     to_parse = f"udp://{s_str}"
 
-                try: 
+                try:
                     parsed = urlparse(to_parse)
                 except Exception as e:
                     logger.warning(f"Failed to parse upstream URL '{s_str}': {e}")
@@ -385,10 +390,10 @@ class UpstreamManager:
                 port = parsed.port
                 path = parsed.path
 
-                if proto not in valid_protos: 
+                if proto not in valid_protos:
                     logger.warning(f"Unsupported protocol '{proto}' in '{s_str}', skipping")
                     continue
-                if not host: 
+                if not host:
                     logger.warning(f"Missing hostname in '{s_str}', skipping")
                     continue
 
@@ -396,36 +401,31 @@ class UpstreamManager:
                     if self._is_valid_ip(host):
                         forced_ip = host
 
-                if port is None: 
+                if port is None:
                     port = valid_protos[proto]
                 elif not self._is_valid_port(port):
-                    logger.warning(f"Invalid port {port} in '{s_str}', using default {valid_protos[proto]}")
+                    logger.warning(f"Invalid port in '{s_str}', using default")
                     port = valid_protos[proto]
-                    
-                if proto == 'https' and not path: 
+
+                if proto == 'https' and not path:
                     path = '/dns-query'
-                else: 
-                    path = "" if proto != 'https' else path
 
-                server_id = f"{host}:{port}:{proto}"
-                if proto == 'https': 
-                    server_id += f":{path}"
-                if forced_ip: 
-                    server_id += f"#{forced_ip}"
-
+                count += 1
+                server_id = f"{proto}://{host}:{port}{path}"
+                
                 server_entry = {
-                    'id': server_id, 
-                    'proto': proto, 
-                    'host': host, 
+                    'id': server_id,
+                    'proto': proto,
+                    'host': host,
                     'ip': forced_ip,
-                    'port': port, 
-                    'path': path, 
+                    'port': port,
+                    'path': path,
                     'latency': float('inf'),
                     'group': group_name,
                     'priority': priority
                 }
+                
                 self.servers.append(server_entry)
-                self.lb_stats[server_id] = {'history': [], 'avg': float('inf'), 'last_used': 0}
                 
                 if self.circuit_breaker_enabled:
                     self.circuit_breakers[server_id] = CircuitBreaker(
@@ -433,22 +433,23 @@ class UpstreamManager:
                         recovery_timeout=self.circuit_recovery_timeout
                     )
                 
-                count += 1
+                self.lb_stats[server_id] = {'history': [], 'avg': float('inf'), 'last_used': 0}
                 
-                if proto == 'https':
-                    display_name = f"{proto.upper()}://{host}:{port}{path}"
+                if forced_ip:
+                    logger.debug(f"Upstream: {proto.upper()}://{host}:{port} -> {forced_ip} (Group: {group_name}, Priority: {priority})")
                 else:
-                    display_name = f"{proto.upper()}://{host}:{port}"
-                
-                logger.debug(f"Parsed: {display_name} (IP: {forced_ip or 'resolve later'}, Pri: {priority}) in group '{group_name}'")
-        
-        logger.info(f"Configuration Loaded: {count} upstream servers parsed.")
+                    logger.debug(f"Upstream: {proto.upper()}://{host}:{port} (Group: {group_name}, Priority: {priority}, Needs Bootstrap)")
+
+        logger.info(f"Parsed {count} upstream servers from configuration")
+
+    # =========================================================================
+    # MONITORING
+    # =========================================================================
 
     async def start_monitor(self):
-        # Initialize DoH client if needed for keepalive
         await self._ensure_doh_client()
         
-        if self.mode == "none": 
+        if self.mode == "none":
             logger.info(f"Monitoring mode: '{self.mode}' - Latency monitoring disabled")
             return
             
@@ -456,7 +457,7 @@ class UpstreamManager:
         logger.info(f"Monitor settings: interval={self.monitor_interval}s, on_query={self.monitor_on_query}, test_domain={self.test_domain}")
         
         expanded_servers = []
-        resolved_hosts = {} 
+        resolved_hosts = {}
         parent_to_children = {}
 
         async with self._servers_lock:
@@ -465,7 +466,7 @@ class UpstreamManager:
                     expanded_servers.append(s)
                     continue
 
-                if s['host'] in resolved_hosts: 
+                if s['host'] in resolved_hosts:
                     ips = resolved_hosts[s['host']]
                 else:
                     ips = await self._bootstrap_resolve(s['host'])
@@ -520,26 +521,26 @@ class UpstreamManager:
                 logger.info(f"  - {proto}: {count} servers")
         
             if not any(s.get('ip') for s in self.servers) and self.fallback_enabled:
-                 logger.warning("Activating Fallback Servers.")
-                 fallback_ips = [b['ip'] for b in self.bootstrappers] if self.bootstrappers else ['86.54.11.1', '9.9.9.9', '1.1.1.2', '8.8.8.8']
-                 for ip in fallback_ips:
-                     fallback_id = f"udp://{ip}:53"
-                     self.servers.append({
-                        'id': fallback_id, 
-                        'proto': 'udp', 
-                        'host': ip, 
-                        'ip': ip, 
-                        'port': 53, 
-                        'path': '', 
-                        'latency': float('inf'), 
+                logger.warning("Activating Fallback Servers.")
+                fallback_ips = [b['ip'] for b in self.bootstrappers] if self.bootstrappers else ['86.54.11.1', '9.9.9.9', '1.1.1.2', '8.8.8.8']
+                for ip in fallback_ips:
+                    fallback_id = f"udp://{ip}:53"
+                    self.servers.append({
+                        'id': fallback_id,
+                        'proto': 'udp',
+                        'host': ip,
+                        'ip': ip,
+                        'port': 53,
+                        'path': '',
+                        'latency': float('inf'),
                         'group': 'Default',
                         'priority': 100
-                     })
-                     if self.circuit_breaker_enabled:
-                         self.circuit_breakers[fallback_id] = CircuitBreaker(
-                             failure_threshold=self.circuit_failure_threshold,
-                             recovery_timeout=self.circuit_recovery_timeout
-                         )
+                    })
+                    if self.circuit_breaker_enabled:
+                        self.circuit_breakers[fallback_id] = CircuitBreaker(
+                            failure_threshold=self.circuit_failure_threshold,
+                            recovery_timeout=self.circuit_recovery_timeout
+                        )
 
         self.last_monitor_time = time.time()
         
@@ -566,7 +567,7 @@ class UpstreamManager:
             logger.info(f"Query-triggered monitoring enabled (checks every {self.monitor_interval}s on demand)")
 
     async def check_latencies(self):
-        if self.mode == "none": 
+        if self.mode == "none":
             logger.debug("Latency check skipped (mode: none)")
             return
         
@@ -587,7 +588,7 @@ class UpstreamManager:
         
             valid_targets = []
             async with self._servers_lock:
-                 valid_targets = [s for s in self.servers if s.get('ip')]
+                valid_targets = [s for s in self.servers if s.get('ip')]
             
             if not valid_targets:
                 logger.warning("No valid upstream targets available for latency check")
@@ -605,27 +606,27 @@ class UpstreamManager:
                 active_ids = set()
                 
                 for i, result in enumerate(results):
-                     lat = 999.0
-                     if not isinstance(result, Exception):
-                         lat = result
-                         if lat < 900.0:
-                             successful_checks += 1
-                         else:
-                             failed_checks += 1
-                     else:
-                         failed_checks += 1
+                    lat = 999.0
+                    if not isinstance(result, Exception):
+                        lat = result
+                        if lat < 900.0:
+                            successful_checks += 1
+                        else:
+                            failed_checks += 1
+                    else:
+                        failed_checks += 1
 
-                     srv = valid_targets[i]
-                     srv['latency'] = lat
-                     sid = srv['id']
-                     active_ids.add(sid)
-                     
-                     stats = self.lb_stats.get(sid)
-                     if stats:
-                         stats['history'].append(lat)
-                         if len(stats['history']) > 5: 
-                             stats['history'].pop(0)
-                         stats['avg'] = sum(stats['history']) / len(stats['history'])
+                    srv = valid_targets[i]
+                    srv['latency'] = lat
+                    sid = srv['id']
+                    active_ids.add(sid)
+                    
+                    stats = self.lb_stats.get(sid)
+                    if stats:
+                        stats['history'].append(lat)
+                        if len(stats['history']) > 5:
+                            stats['history'].pop(0)
+                        stats['avg'] = sum(stats['history']) / len(stats['history'])
                 
                 stale_ids = [sid for sid in self.lb_stats if sid not in active_ids]
                 for sid in stale_ids:
@@ -635,8 +636,8 @@ class UpstreamManager:
             
             snapshot_stats = {}
             async with self._stats_lock:
-                 for sid, data in self.lb_stats.items():
-                     snapshot_stats[sid] = data.get('avg', float('inf'))
+                for sid, data in self.lb_stats.items():
+                    snapshot_stats[sid] = data.get('avg', float('inf'))
             
             async with self._servers_lock:
                 before_top3 = [
@@ -646,8 +647,9 @@ class UpstreamManager:
                 
                 if self.mode in ['fastest', 'failover']:
                     self.servers.sort(key=lambda x: (x.get('priority', 100), x['latency']))
-                elif self.mode == 'loadbalance': 
+                elif self.mode == 'loadbalance':
                     self.servers.sort(key=lambda x: (x.get('priority', 100), snapshot_stats.get(x['id'], 999.0)))
+                # Note: random, roundrobin, sticky, none don't need sorting here
                 
                 after_top3 = [
                     (s['id'], s['proto'].upper(), s['latency'], snapshot_stats.get(s['id'], float('inf')), s.get('priority', 100))
@@ -668,7 +670,8 @@ class UpstreamManager:
                 display_count = min(10, len(self.servers))
             
             targets = self.servers[:display_count]
-            if not targets: return
+            if not targets:
+                return
 
             for i, s in enumerate(targets, 1):
                 proto = s['proto'].upper()
@@ -682,13 +685,13 @@ class UpstreamManager:
             timeout = 5.0
             
             result = None
-            if server['proto'] == 'udp': 
+            if server['proto'] == 'udp':
                 result = await self._udp_query(server['ip'], server['port'], pkt, timeout)
-            elif server['proto'] == 'tcp': 
+            elif server['proto'] == 'tcp':
                 result = await self._tcp_query(server['ip'], server['port'], pkt, timeout)
-            elif server['proto'] == 'https': 
+            elif server['proto'] == 'https':
                 result = await self._doh_query(server, pkt, timeout)
-            elif server['proto'] == 'tls': 
+            elif server['proto'] == 'tls':
                 result = await self._dot_query(server['ip'], server['port'], server['host'], pkt, timeout)
             
             if result:
@@ -698,13 +701,17 @@ class UpstreamManager:
         except Exception:
             return 999.0
 
+    # =========================================================================
+    # STICKY MAP HELPERS
+    # =========================================================================
+
     async def _update_sticky_map(self, client_ip, server_id):
         async with self._sticky_lock:
             if client_ip in self._sticky_map:
-                 self._sticky_map.move_to_end(client_ip)
+                self._sticky_map.move_to_end(client_ip)
             self._sticky_map[client_ip] = server_id
             if len(self._sticky_map) > self._sticky_max_size:
-                 self._sticky_map.popitem(last=False)
+                self._sticky_map.popitem(last=False)
             
             now = time.time()
             if now - self._last_sticky_cleanup > 3600:
@@ -716,15 +723,20 @@ class UpstreamManager:
     async def _get_sticky_server(self, client_ip):
         async with self._sticky_lock:
             if client_ip in self._sticky_map:
-                self._sticky_map.move_to_end(client_ip) 
+                self._sticky_map.move_to_end(client_ip)
                 return self._sticky_map[client_ip]
             return None
+
+    # =========================================================================
+    # FORWARDING - MAIN ENTRY POINT (FIXED)
+    # =========================================================================
 
     async def forward_query(self, query_data, qid=0, client_ip="Unknown", upstream_group="Default", req_logger=None):
         log = req_logger or logger
         
         await self._ensure_doh_client()
         
+        # Trigger background latency check if needed
         should_check = False
         if self.monitor_on_query and self.mode != "none":
             current_time = time.time()
@@ -741,45 +753,100 @@ class UpstreamManager:
                 q_msg = dns.message.from_wire(query_data)
                 if q_msg.question:
                     query_info = f"{q_msg.question[0].name}"
-                    if not qid: 
+                    if not qid:
                         qid = q_msg.id
-            except: 
+            except:
                 pass
 
-        async with self._servers_lock:
-            candidates = [s for s in self.servers if s['group'] == upstream_group and s.get('ip')]
-            if not candidates and upstream_group != "Default":
-                candidates = [s for s in self.servers if s.get('ip')]
-            
-            snapshot_stats = {}
-            async with self._stats_lock:
-                for s in candidates:
-                    snapshot_stats[s['id']] = self.lb_stats.get(s['id'], {}).get('avg', float('inf'))
-            
-            if self.mode == 'fastest':
-                candidates.sort(key=lambda x: (x.get('priority', 100), x['latency']))
-            elif self.mode == 'loadbalance':
-                candidates.sort(key=lambda x: (x.get('priority', 100), snapshot_stats.get(x['id'], 999.0)))
-            elif self.mode == 'failover':
-                candidates.sort(key=lambda x: (x.get('priority', 100), x['latency']))
+        # --- SERVER SELECTION (FIXED) ---
+        selected = None
         
-        if self.circuit_breaker_enabled:
-            candidates = [
-                s for s in candidates 
-                if s['id'] not in self.circuit_breakers or self.circuit_breakers[s['id']].can_attempt()
-            ]
+        # Handle sticky mode first - check if client already has a pinned server
+        if self.mode == 'sticky':
+            sticky_server_id = await self._get_sticky_server(client_ip)
+            if sticky_server_id:
+                async with self._servers_lock:
+                    for s in self.servers:
+                        if s['id'] == sticky_server_id and s['group'] == upstream_group and s.get('ip'):
+                            # Check circuit breaker
+                            if self.circuit_breaker_enabled:
+                                cb = self.circuit_breakers.get(s['id'])
+                                if cb and not cb.can_attempt():
+                                    log.debug(f"Sticky server {sticky_server_id} circuit open, falling back")
+                                    break
+                            selected = [s]
+                            break
         
-        if not candidates: 
-            log.error(f"FORWARD FAILURE [ID:{qid}]: No valid upstreams available")
-            return None
+        # If no sticky match (or not sticky mode), do normal selection
+        if not selected:
+            async with self._servers_lock:
+                candidates = [s for s in self.servers if s['group'] == upstream_group and s.get('ip')]
+                if not candidates and upstream_group != "Default":
+                    candidates = [s for s in self.servers if s.get('ip')]
+                
+                if not candidates:
+                    log.error(f"FORWARD FAILURE [ID:{qid}]: No valid upstreams available")
+                    return None
+                
+                # Apply circuit breaker filter
+                if self.circuit_breaker_enabled:
+                    candidates = [
+                        s for s in candidates
+                        if s['id'] not in self.circuit_breakers or self.circuit_breakers[s['id']].can_attempt()
+                    ]
+                
+                if not candidates:
+                    log.error(f"FORWARD FAILURE [ID:{qid}]: All upstreams circuit-broken")
+                    return None
+                
+                # Mode-specific selection
+                if self.mode == 'none':
+                    # Use first available, no sorting
+                    selected = candidates[:3]
+                    
+                elif self.mode == 'random':
+                    # Shuffle and pick
+                    shuffled = candidates.copy()
+                    random.shuffle(shuffled)
+                    selected = shuffled[:3]
+                    
+                elif self.mode == 'roundrobin':
+                    # Rotate through servers
+                    async with self._rr_lock:
+                        idx = self._rr_index % len(candidates)
+                        self._rr_index += 1
+                    # Reorder: start from idx, wrap around
+                    selected = candidates[idx:] + candidates[:idx]
+                    selected = selected[:3]
+                    
+                elif self.mode == 'sticky':
+                    # No existing sticky match, pick fastest and will pin on success
+                    candidates.sort(key=lambda x: (x.get('priority', 100), x['latency']))
+                    selected = candidates[:3]
+                    
+                elif self.mode == 'loadbalance':
+                    snapshot_stats = {}
+                    async with self._stats_lock:
+                        for s in candidates:
+                            snapshot_stats[s['id']] = self.lb_stats.get(s['id'], {}).get('avg', float('inf'))
+                    candidates.sort(key=lambda x: (x.get('priority', 100), snapshot_stats.get(x['id'], 999.0)))
+                    selected = candidates[:3]
+                    
+                elif self.mode == 'failover':
+                    # Sort by priority then latency, try in order
+                    candidates.sort(key=lambda x: (x.get('priority', 100), x['latency']))
+                    selected = candidates[:3]
+                    
+                else:  # 'fastest' or default
+                    candidates.sort(key=lambda x: (x.get('priority', 100), x['latency']))
+                    selected = candidates[:3]
         
-        selected = candidates[:3] # Simplified selection logic for brevity
-        
+        # --- QUERY EXECUTION ---
         for server in selected:
             try:
                 async with self._stats_lock:
                     if server['id'] in self.lb_stats:
-                         self.lb_stats[server['id']]['last_used'] = time.time()
+                        self.lb_stats[server['id']]['last_used'] = time.time()
                 
                 start_t = time.time()
                 resp = None
@@ -787,13 +854,13 @@ class UpstreamManager:
                 ip = server['ip']
                 port = server['port']
                 
-                if server['proto'] == 'udp': 
+                if server['proto'] == 'udp':
                     resp = await self._udp_query(ip, port, query_data)
-                elif server['proto'] == 'tcp': 
+                elif server['proto'] == 'tcp':
                     resp = await self._tcp_query(ip, port, query_data)
-                elif server['proto'] == 'https': 
+                elif server['proto'] == 'https':
                     resp = await self._doh_query(server, query_data)
-                elif server['proto'] == 'tls': 
+                elif server['proto'] == 'tls':
                     resp = await self._dot_query(ip, port, server['host'], query_data)
                 
                 if resp:
@@ -819,6 +886,10 @@ class UpstreamManager:
                 
         log.error("All selected upstream servers failed to respond")
         return None
+
+    # =========================================================================
+    # TRANSPORT: UDP & TCP
+    # =========================================================================
 
     async def _udp_query(self, ip, port, data, timeout=5):
         loop = asyncio.get_running_loop()
@@ -851,7 +922,9 @@ class UpstreamManager:
             logger.debug(f"TCP Error {ip}: {e}")
             return None
 
-    # --- DoT (DNS-over-TLS) Implementation ---
+    # =========================================================================
+    # TRANSPORT: DoT (DNS-over-TLS)
+    # =========================================================================
 
     async def _dot_query(self, ip, port, host, data, timeout=5):
         if self.connection_reuse:
@@ -864,16 +937,14 @@ class UpstreamManager:
         logger.debug(f"DEBUG: DoT Connection OPEN to {host} ({ip})")
         try:
             reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(ip, port, ssl=self.ssl_context, server_hostname=host), 
+                asyncio.open_connection(ip, port, ssl=self.ssl_context, server_hostname=host),
                 timeout
             )
             
             try:
-                # Send
                 writer.write(len(data).to_bytes(2, 'big') + data)
                 await writer.drain()
                 
-                # Receive
                 len_bytes = await asyncio.wait_for(reader.readexactly(2), timeout)
                 length = int.from_bytes(len_bytes, 'big')
                 resp = await asyncio.wait_for(reader.readexactly(length), timeout)
@@ -889,17 +960,10 @@ class UpstreamManager:
     async def _dot_query_reusing(self, ip, port, host, data, timeout=5):
         """Pooled DoT query with connection reuse and smart retry"""
         key = (ip, port, host)
-        # Lock per upstream to ensure simple request/response serialization on the socket
         async with self._dot_locks[key]:
-            # Attempt loop: 
-            # 1. Try existing connection (if exists)
-            # 2. If fails or no connection, open new one and try
-            # Max 2 attempts ensures we don't loop forever, but handles the "server closed idle connection" case
-            
             for attempt in range(2):
                 connection = self._dot_pool.get(key)
                 
-                # Prune explicitly closed connections
                 if connection:
                     reader, writer = connection
                     if writer.is_closing():
@@ -909,7 +973,6 @@ class UpstreamManager:
 
                 is_reused = (connection is not None)
 
-                # Create new if needed
                 if not connection:
                     logger.debug(f"DEBUG: DoT Connection OPEN to {host} ({ip})")
                     try:
@@ -921,10 +984,8 @@ class UpstreamManager:
                         self._dot_pool[key] = connection
                     except Exception as e:
                         logger.debug(f"DoT Connect Error {host} ({ip}): {e}")
-                        # If we can't connect, no point retrying
                         return None
 
-                # Perform Query
                 reader, writer = connection
                 try:
                     writer.write(len(data).to_bytes(2, 'big') + data)
@@ -939,10 +1000,8 @@ class UpstreamManager:
                     return resp
                     
                 except Exception as e:
-                    # On error, assume connection is dead
                     logger.debug(f"DoT Error {host} ({ip}) [Reuse={is_reused}]: {e}")
                     
-                    # Clean up broken connection
                     try:
                         writer.close()
                     except:
@@ -951,8 +1010,6 @@ class UpstreamManager:
                     if key in self._dot_pool:
                         del self._dot_pool[key]
                     
-                    # If this was a reused connection, it might have just timed out/closed by server.
-                    # We should try again immediately with a fresh connection.
                     if is_reused and attempt == 0:
                         logger.debug(f"DEBUG: Retrying DoT query with fresh connection to {host} ({ip})")
                         continue
@@ -961,7 +1018,9 @@ class UpstreamManager:
             
             return None
 
-    # --- DoH (DNS-over-HTTPS) Implementation ---
+    # =========================================================================
+    # TRANSPORT: DoH (DNS-over-HTTPS)
+    # =========================================================================
 
     async def _doh_query(self, server, data, timeout=5):
         if self.connection_reuse:
@@ -979,7 +1038,6 @@ class UpstreamManager:
             port = server['port']
             path = server['path']
             
-            # Construct URL and headers
             if ip:
                 url_ip = f"[{ip}]" if ':' in ip and not ip.startswith('[') else ip
                 url = f"https://{url_ip}:{port}{path}"
@@ -991,9 +1049,6 @@ class UpstreamManager:
                 headers = DOH_HEADERS.copy()
                 extensions = {}
 
-            # Retry loop for persistent connections
-            # Servers often close idle HTTP/2 connections. httpx handles some cases,
-            # but explicit retry ensures robustness for POST requests.
             for attempt in range(2):
                 try:
                     msg = "KeepAlive" if attempt == 0 else "Retry"
@@ -1010,10 +1065,8 @@ class UpstreamManager:
                         logger.debug(f"DoH HTTP {response.status_code} from {url}")
                         return None
                         
-                except (Exception) as e:
-                    # Identify if we should retry
-                    # httpx errors: RemoteProtocolError, ConnectError, ReadTimeout (maybe)
-                    is_network_error = True # Simplified assumption for robustness
+                except Exception as e:
+                    is_network_error = True
                     
                     if attempt == 0 and is_network_error:
                         logger.debug(f"DoH KeepAlive failed ({e}), retrying...")
@@ -1029,7 +1082,6 @@ class UpstreamManager:
     async def _doh_query_oneshot(self, server, data, timeout=5):
         """Creates a fresh httpx client context for each request"""
         try:
-            # We import here to avoid global dependency issues if not installed
             import httpx
             
             ip = server.get('ip')
@@ -1050,7 +1102,6 @@ class UpstreamManager:
 
             logger.debug(f"DEBUG: DoH Connection OPEN to {host} ({ip})")
             
-            # Create ephemeral client
             async with httpx.AsyncClient(http2=True, verify=True) as client:
                 response = await asyncio.wait_for(
                     client.post(url, content=data, headers=headers, extensions=extensions),

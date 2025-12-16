@@ -228,7 +228,15 @@ class DNSHandler:
         if self.ptr_check_mode not in ['strict', 'none']:
             logger.warning(f"Invalid ptr_check mode '{self.ptr_check_mode}', defaulting to 'none'")
             self.ptr_check_mode = 'none'
-        
+
+        # PTR Check RCODE
+        ptr_rcode_str = self.config.get('filtering', {}).get('ptr_check_rcode', 'FORMERR').upper()
+        try:
+            self.ptr_check_rcode = getattr(dns.rcode, ptr_rcode_str)
+        except AttributeError:
+            logger.warning(f"Invalid ptr_check_rcode '{ptr_rcode_str}', defaulting to FORMERR")
+            self.ptr_check_rcode = dns.rcode.SERVFAIL
+
         self.group_ip_map: Dict[str, str] = {}
         self.group_mac_map: Dict[str, str] = {}
         self.group_srv_ip_map: Dict[str, str] = {}
@@ -236,6 +244,8 @@ class DNSHandler:
         self.group_cidr_list: List[Tuple[str, str]] = []
         self.group_geoip_list: List[Tuple[str, str]] = []
         self.group_default_actions: Dict[str, str] = {}
+
+        self.group_domain_list: List[Tuple[str, str]] = []  # (domain_pattern, group_name)
 
         self._build_client_maps(groups or {})
         
@@ -254,6 +264,12 @@ class DNSHandler:
                         start_idx = 1
             for ident in identifiers[start_idx:]:
                 ident_lower = ident.lower().strip()
+                if ident_lower.startswith('domain:'):
+                    domain_pattern = ident_lower[7:].strip().lstrip('.')
+                    if domain_pattern:
+                        self.group_domain_list.append((domain_pattern, gname))
+                        logger.debug(f"Group '{gname}': Added domain selector '{domain_pattern}'")
+                    continue
                 if ident_lower.startswith('server_ip:'):
                     self.group_srv_ip_map[ident_lower[10:]] = gname
                     continue
@@ -336,6 +352,27 @@ class DNSHandler:
                 return str(net.network_address), m
         except Exception:
             return ip_str, 0
+
+    def identify_by_domain(self, qname_norm: str, req_logger) -> str | None:
+        """Match query domain against domain-based group selectors."""
+        if not self.group_domain_list:
+            return None
+        
+        # Remove trailing dot if present
+        qname_clean = qname_norm.rstrip('.')
+        
+        for domain_pattern, gname in self.group_domain_list:
+            # Exact match
+            if qname_clean == domain_pattern:
+                req_logger.info(f"Client identified as group '{gname}'. Reason: Domain exact match '{domain_pattern}'")
+                return gname
+            
+            # Suffix match (e.g., "home" matches "printer.home", "foo.bar.home")
+            if qname_clean.endswith('.' + domain_pattern):
+                req_logger.info(f"Client identified as group '{gname}'. Reason: Domain suffix match '*.{domain_pattern}'")
+                return gname
+        
+        return None
 
     def identify_client(self, addr, meta, req_logger) -> str | None:
         srv_ip = (meta.get('server_ip') or '').lower()
@@ -595,13 +632,20 @@ class DNSHandler:
             if is_reverse:
                 extracted_ip = self._extract_ip_from_ptr(qname_str)
                 if not extracted_ip:
-                    req_logger.info(f"⛔ BLOCKED | Reason: Invalid PTR Syntax | Domain: {qname_norm} | Mode: ptr_check=strict")
-                    return self.create_block_response(request, q.name, qtype).to_wire()
+                    req_logger.info(f"⛔ BLOCKED | Reason: Invalid PTR Syntax | Domain: {qname_norm} | Mode: ptr_check=strict | RCODE: {dns.rcode.to_text(self.ptr_check_rcode)}")
+                    return self.create_block_response(request, q.name, qtype, force_rcode=self.ptr_check_rcode).to_wire()
                 else:
                     req_logger.debug(f"PTR Check OK: {qname_norm} -> {extracted_ip}")
 
-        group = self.identify_client(client_addr, meta, req_logger)
+        # First check domain-based group matching
+        group = self.identify_by_domain(qname_norm, req_logger)
+        
+        # Fall back to client-based identification
+        if not group:
+            group = self.identify_client(client_addr, meta, req_logger)
+        
         group_key = group if group else "default"
+
         policy_name, policy_source = self.get_active_policy(group, req_logger)
         
         req_logger.debug(f"DECISION: Client Group: '{group_key}' -> Policy: '{policy_name}' (Source: {policy_source})")
