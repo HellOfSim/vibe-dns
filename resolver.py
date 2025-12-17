@@ -580,7 +580,7 @@ class DNSHandler:
             
             req_logger.debug(
                 f"CLIENT ID DATA | MatchIP: {log_ip} | MAC_Sys: {d_mac_sys} | MAC_EDNS: {d_mac_edns} | "
-                f"SrvIP: {d_srv_ip} | SrvPort: {d_srv_port} | SNI: {d_sni} | DoH: {d_doh} | GeoIP: {d_geoip}"
+                f"SrvIP: {d_srv_ip} | SrvPort: {d_srv_port} | SNI: {d_sni} | DOH-Path: {d_doh} | GeoIP: {d_geoip}"
             )
 
         if qtype == dns.rdatatype.PTR and self.ptr_check_mode == 'strict':

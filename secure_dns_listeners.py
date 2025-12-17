@@ -40,7 +40,8 @@ class DoTServer:
             tls_version = ssl_obj.version()
             cipher = ssl_obj.cipher()
             try:
-                sni = getattr(ssl_obj, "server_hostname", None)
+                # Try custom attribute from callback first, then standard attribute
+                sni = getattr(ssl_obj, "vibe_sni", None) or getattr(ssl_obj, "server_hostname", None)
             except Exception:
                 pass
         
@@ -141,7 +142,8 @@ class DoHServer:
             except:
                 pass
             try:
-                sni = getattr(ssl_obj, "server_hostname", None)
+                # Try custom attribute from callback first, then standard attribute
+                sni = getattr(ssl_obj, "vibe_sni", None) or getattr(ssl_obj, "server_hostname", None)
             except:
                 pass
         
@@ -351,7 +353,7 @@ class DoHServer:
 
 
 def create_ssl_context(cert_file: str, key_file: str, ca_file: Optional[str] = None) -> ssl.SSLContext:
-    """Create SSL context for DoT/DoH"""
+    """Create SSL context for DoT/DoH with explicit SNI capture"""
     logger.info(f"Creating SSL context (Cert: {cert_file}, Key: {key_file})")
     
     context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
@@ -373,6 +375,13 @@ def create_ssl_context(cert_file: str, key_file: str, ca_file: Optional[str] = N
     
     # Enable H2 negotiation for DoH, but be compatible with DoT
     context.set_alpn_protocols(['h2', 'http/1.1', 'dot'])
+    
+    # --- SNI Callback to ensure extraction ---
+    def sni_callback(ssl_obj, server_name, ctx):
+        # Store SNI on the SSL object for retrieval in handlers
+        setattr(ssl_obj, "vibe_sni", server_name)
+    
+    context.sni_callback = sni_callback
     
     return context
 
