@@ -29,17 +29,24 @@ class DoTServer:
         # Extract TLS info
         tls_version = None
         cipher = None
+        sni = None
+        
         if ssl_obj:
             tls_version = ssl_obj.version()
             cipher = ssl_obj.cipher()
+            try:
+                sni = getattr(ssl_obj, "server_hostname", None)
+            except Exception:
+                pass
         
         logger.info(f"DoT Connection from {addr[0]}:{addr[1]} on {self.host}:{self.port} "
-                   f"(TLS: {tls_version}, Cipher: {cipher[0] if cipher else 'Unknown'})")
+                   f"(TLS: {tls_version}, Cipher: {cipher[0] if cipher else 'Unknown'}, SNI: {sni})")
         
         meta = {
             'proto': 'dot',
             'server_ip': self.host,
-            'server_port': self.port
+            'server_port': self.port,
+            'sni': sni
         }
         
         queries_handled = 0
@@ -114,11 +121,17 @@ class DoHServer:
         tls_version = None
         cipher = None
         alpn_protocol = None
+        sni = None
+        
         if ssl_obj:
             tls_version = ssl_obj.version()
             cipher = ssl_obj.cipher()
             try:
                 alpn_protocol = ssl_obj.selected_alpn_protocol()
+            except:
+                pass
+            try:
+                sni = getattr(ssl_obj, "server_hostname", None)
             except:
                 pass
         
@@ -133,7 +146,7 @@ class DoHServer:
             return
         
         logger.info(f"DoH Connection from {addr[0]}:{addr[1]} on {self.host}:{self.port} "
-                   f"(TLS: {tls_version}, Cipher: {cipher[0] if cipher else 'Unknown'}, ALPN: h2)")
+                   f"(TLS: {tls_version}, Cipher: {cipher[0] if cipher else 'Unknown'}, ALPN: h2, SNI: {sni})")
         
         try:
             # Import h2 library
@@ -170,7 +183,8 @@ class DoHServer:
             meta = {
                 'proto': 'doh',
                 'server_ip': self.host,
-                'server_port': self.port
+                'server_port': self.port,
+                'sni': sni
             }
             
             while True:
@@ -314,7 +328,12 @@ class DoHServer:
                         
                         # Process DNS query
                         logger.debug(f"DoH {addr[0]}:{addr[1]} - Stream {stream_id}: Processing DNS query ({len(dns_data)} bytes)")
-                        dns_response = await self.handler.process_query(dns_data, addr, meta)
+                        
+                        # Add path information to query meta
+                        req_meta = meta.copy()
+                        req_meta['doh_path'] = request_path
+
+                        dns_response = await self.handler.process_query(dns_data, addr, req_meta)
                         
                         if dns_response:
                             duration_ms = (time.time() - stream_info['start_time']) * 1000

@@ -2,7 +2,7 @@
 # filename: resolver.py
 # -----------------------------------------------------------------------------
 # Project: Filtering DNS Server (Refactored)
-# Version: 7.8.0 (Short-Circuit Logic + PTR Check + CNAME Fix)
+# Version: 7.9.0 (Added SNI/DoH-Path Support & Debug Logging)
 # -----------------------------------------------------------------------------
 """
 Core DNS Resolution logic.
@@ -241,6 +241,8 @@ class DNSHandler:
         self.group_mac_map: Dict[str, str] = {}
         self.group_srv_ip_map: Dict[str, str] = {}
         self.group_srv_port_map: Dict[str, str] = {}
+        self.group_sni_map: Dict[str, str] = {}
+        self.group_doh_path_map: Dict[str, str] = {}
         self.group_cidr_list: List[Tuple[str, str]] = []
         self.group_geoip_list: List[Tuple[str, str]] = []
         self.group_default_actions: Dict[str, str] = {}
@@ -275,6 +277,12 @@ class DNSHandler:
                     continue
                 if ident_lower.startswith('server_port:'):
                     self.group_srv_port_map[ident_lower[12:]] = gname
+                    continue
+                if ident_lower.startswith('sni:'):
+                    self.group_sni_map[ident_lower[4:]] = gname
+                    continue
+                if ident_lower.startswith('doh_path:'):
+                    self.group_doh_path_map[ident_lower[9:]] = gname
                     continue
                 if ident_lower.startswith('geoip:'):
                     self.group_geoip_list.append((ident_lower[6:], gname))
@@ -375,46 +383,92 @@ class DNSHandler:
         return None
 
     def identify_client(self, addr, meta, req_logger) -> str | None:
+        # Extract all potential identifiers
         srv_ip = (meta.get('server_ip') or '').lower()
         srv_port = str(meta.get('server_port', ''))
+        sni = (meta.get('sni') or '').lower()
+        doh_path = (meta.get('doh_path') or '').lower()
+        source_ip = addr[0]
+        match_ip = meta.get('ecs_ip') or source_ip
+        match_ip_lower = match_ip.lower()
+        mac = meta.get('mac_override') or self.mac_mapper.get_mac(source_ip) or ""
+        mac_lower = mac.lower()
 
+        # Debug logging of found arguments
+        debug_args = []
+        debug_args.append(f"IP={match_ip}")
+        debug_args.append(f"SrvIP={srv_ip}")
+        debug_args.append(f"SrvPort={srv_port}")
+        debug_args.append(f"SNI={sni if sni else 'N/A'}")
+        debug_args.append(f"DoH={doh_path if doh_path else 'N/A'}")
+        debug_args.append(f"MAC={mac if mac else 'N/A'}")
+
+        geo_status = "Disabled/NotLoaded"
+        if self.geoip and self.geoip.enabled:
+            try:
+                geo_data = self.geoip.lookup(match_ip)
+                if geo_data:
+                    cc = geo_data.get('country_code', 'Unknown')
+                    geo_status = f"{cc}"
+                else:
+                    geo_status = "NoMatch"
+            except: 
+                geo_status = "Error"
+        
+        debug_args.append(f"GeoIP={geo_status}")
+        
+        req_logger.debug(f"Client Identification Args: {', '.join(debug_args)}")
+
+        # Matching Logic (Order matters)
+        # 1. Server IP
         if srv_ip in self.group_srv_ip_map:
             gname = self.group_srv_ip_map[srv_ip]
             req_logger.info(f"Client identified as group '{gname}'. Reason: Matched Listening IP '{srv_ip}'")
             return gname
         
+        # 2. Server Port
         if srv_port in self.group_srv_port_map:
             gname = self.group_srv_port_map[srv_port]
             req_logger.info(f"Client identified as group '{gname}'. Reason: Matched Listening Port '{srv_port}'")
             return gname
-
-        source_ip = addr[0]
-        match_ip = meta.get('ecs_ip') or source_ip
-        match_ip_lower = match_ip.lower()
         
-        mac = meta.get('mac_override') or self.mac_mapper.get_mac(source_ip)
-        if mac:
-            mac_lower = mac.lower()
-            if mac_lower in self.group_mac_map:
-                gname = self.group_mac_map[mac_lower]
-                req_logger.info(f"Client identified as group '{gname}'. Reason: Matched MAC '{mac}'")
-                return gname
+        # 3. SNI (New)
+        if sni and sni in self.group_sni_map:
+            gname = self.group_sni_map[sni]
+            req_logger.info(f"Client identified as group '{gname}'. Reason: Matched SNI '{sni}'")
+            return gname
 
+        # 4. DoH Path (New)
+        if doh_path and doh_path in self.group_doh_path_map:
+            gname = self.group_doh_path_map[doh_path]
+            req_logger.info(f"Client identified as group '{gname}'. Reason: Matched DoH Path '{doh_path}'")
+            return gname
+
+        # 5. MAC
+        if mac_lower and mac_lower in self.group_mac_map:
+            gname = self.group_mac_map[mac_lower]
+            req_logger.info(f"Client identified as group '{gname}'. Reason: Matched MAC '{mac}'")
+            return gname
+
+        # 6. IP
         if match_ip_lower in self.group_ip_map:
             gname = self.group_ip_map[match_ip_lower]
             req_logger.info(f"Client identified as group '{gname}'. Reason: Matched IP '{match_ip}'")
             return gname
 
+        # 7. CIDR
         for cidr, gname in self.group_cidr_list:
             if is_ip_in_network(match_ip, cidr):
                 req_logger.info(f"Client identified as group '{gname}'. Reason: IP '{match_ip}' is in Subnet '{cidr}'")
                 return gname
 
+        # 8. GeoIP
         if self.geoip and self.geoip.enabled and self.group_geoip_list:
             for location, gname in self.group_geoip_list:
                 if self.geoip.match_location(match_ip, location):
                     req_logger.info(f"✓ Client identified as group '{gname}' | Reason: GeoIP Match | IP: {match_ip} | Location: {location}")
                     return gname
+        
         return None
 
     def is_schedule_active(self, schedule_name):
