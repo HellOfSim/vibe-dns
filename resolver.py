@@ -560,6 +560,29 @@ class DNSHandler:
         req_logger = ContextAdapter(logger, ctx)
         req_logger.info(f"QUERY: {qname_norm} [{dns.rdatatype.to_text(qtype)}]")
 
+        if req_logger.isEnabledFor(logging.DEBUG):
+            d_mac_sys = self.mac_mapper.get_mac(client_ip) or "N/A"
+            d_mac_edns = edns_mac or "N/A"
+            d_srv_ip = meta.get('server_ip') or "N/A"
+            d_srv_port = str(meta.get('server_port')) if meta.get('server_port') else "N/A"
+            d_sni = meta.get('sni') or "N/A"
+            d_doh = meta.get('doh_path') or "N/A"
+            
+            d_geoip = "N/A"
+            if self.geoip and self.geoip.enabled:
+                 geo_data = self.geoip.lookup(log_ip)
+                 if geo_data:
+                     parts = set()
+                     if geo_data.get('country_code'): parts.add(geo_data['country_code'])
+                     if geo_data.get('continent_code'): parts.add(geo_data['continent_code'])
+                     for r in geo_data.get('regions', []): parts.add(r)
+                     if parts: d_geoip = ",".join(sorted(parts))
+            
+            req_logger.debug(
+                f"CLIENT ID DATA | MatchIP: {log_ip} | MAC_Sys: {d_mac_sys} | MAC_EDNS: {d_mac_edns} | "
+                f"SrvIP: {d_srv_ip} | SrvPort: {d_srv_port} | SNI: {d_sni} | DoH: {d_doh} | GeoIP: {d_geoip}"
+            )
+
         if qtype == dns.rdatatype.PTR and self.ptr_check_mode == 'strict':
             is_reverse = qname_norm.endswith('.in-addr.arpa') or qname_norm.endswith('.ip6.arpa')
             if is_reverse:
