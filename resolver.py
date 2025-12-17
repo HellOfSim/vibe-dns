@@ -676,6 +676,16 @@ class DNSHandler:
 
         # Domain/category filtering
         if engine:
+            type_action, type_reason, type_list = engine.check_type(qtype)
+            if type_action == "DROP":
+                req_logger.info(f"🔇 DROPPED | Reason: {type_reason} | Type: {dns.rdatatype.to_text(qtype)}")
+                self.decision_cache.put_decision(qname_norm, qtype, group_key, policy_name, {'action': 'DROP', 'reason': type_reason, 'rule': 'N/A', 'list': type_list})
+                return None
+            elif type_action == "BLOCK":
+                req_logger.info(f"⛔ BLOCKED | Reason: {type_reason} | Type: {dns.rdatatype.to_text(qtype)}")
+                self.decision_cache.put_decision(qname_norm, qtype, group_key, policy_name, {'action': 'BLOCK', 'reason': type_reason, 'rule': 'N/A', 'list': type_list})
+                return self.create_block_response(request, q.name, qtype).to_wire()
+
             if not is_explicit_allow:
                 action, rule, list_name = engine.is_blocked(qname_norm, geoip_lookup=self.geoip)
                 if action == "BLOCK":
