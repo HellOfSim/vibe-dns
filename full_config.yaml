@@ -46,6 +46,24 @@ server:
   # Max concurrent UDP requests to process simultaneously.
   # Packets exceeding this limit are dropped to prevent resource exhaustion.
   udp_concurrency: 1000
+
+  tls:
+    enabled: false  # Set to true to enable DoH/DoT
+    enable_dot: true
+    enable_doh: true
+
+    # Ports to listen on
+    port_dot: [853, 8853]
+    port_doh: [443, 8443]
+    
+    # Certificate paths (required when enabled)
+    cert_file: "/path/to/cert.pem"
+    key_file: "/path/to/key.pem"
+    # ca_file: "/path/to/ca.pem"  # Optional: for client cert verification
+    
+    # DoH specific settings
+    doh_paths: ["/", "/dns-query"]  # RFC 8484 standard path
+    doh_strict_paths: false
   
   # --- EDNS Client Subnet (ECS) Handling ---
   # Enable parsing of ECS data from incoming clients

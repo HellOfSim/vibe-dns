@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 # filename: defaults.py
-# -----------------------------------------------------------------------------
-# Project: Filtering DNS Server
-# Version: 2.1.0 (Added PTR Check)
-# -----------------------------------------------------------------------------
+# Version: 2.2.0 (DoH/DoT Support)
 """
 Default configuration values - single source of truth.
 """
@@ -20,7 +17,19 @@ DEFAULT_CONFIG = {
         'ecs_ipv4_mask': 24,
         'ecs_ipv6_mask': 56,
         'ecs_override_ipv4': None,
-        'ecs_override_ipv6': None
+        'ecs_override_ipv6': None,
+        'tls': {
+            'enabled': False,
+            'enable_dot': True,
+            'enable_doh': True,
+            'port_dot': [853],
+            'port_doh': [443],
+            'cert_file': None,
+            'key_file': None,
+            'ca_file': None,
+            'doh_paths': ['/dns-query'],
+            'doh_strict_paths': False
+        }
     },
     'upstream': {
         'startup_check_enabled': True,
@@ -118,10 +127,21 @@ def merge_with_defaults(config: dict) -> dict:
     for key, value in config.items():
         if isinstance(value, dict) and key in merged and isinstance(merged[key], dict):
             # Deep merge for nested dicts
-            merged[key].update(value)
+            merged[key] = _deep_merge(merged[key], value)
         else:
             # Direct replacement for non-dicts
             merged[key] = value
     
     return merged
+
+
+def _deep_merge(base: dict, overlay: dict) -> dict:
+    """Recursively merge overlay into base"""
+    result = base.copy()
+    for key, value in overlay.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
 

@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 # filename: server.py
-# -----------------------------------------------------------------------------
-# Project: Filtering DNS Server (Refactored)
-# Version: 4.6.0 (Skip Validation Option)
-# -----------------------------------------------------------------------------
+# Version: 4.7.0 (DoH/DoT Support)
 """
-Main Server Module with concurrency limits and configurable validation.
+Main Server Module with DoH/DoT support
 """
 
 import asyncio
@@ -28,6 +25,7 @@ from utils import setup_logger, MacMapper, get_server_ips, get_logger, GroupFile
 from config_validator import validate_config
 from defaults import merge_with_defaults
 from geoip import GeoIPLookup
+from secure_dns_listeners import DoTServer, DoHServer, create_ssl_context
 
 logger = get_logger("Server")
 
@@ -39,7 +37,6 @@ class UDPServer:
         self.host = host
         self.port = port
         self.transport = None
-        # Semaphore to bound concurrent tasks
         self.sem = asyncio.Semaphore(max_concurrent)
 
     def connection_made(self, transport):
@@ -47,15 +44,12 @@ class UDPServer:
         logger.debug(f"UDP Transport bound to {self.host}:{self.port}")
 
     def datagram_received(self, data, addr):
-        # Optimization: Check if semaphore is locked (pool full) BEFORE creating task
         if self.sem.locked():
-            logger.warning(f"UDP Overload: Dropping packet from {addr} (Max concurrent: {self.sem._value})")
+            logger.warning(f"UDP Overload: Dropping packet from {addr}")
             return
-
         asyncio.create_task(self.handle_safe(data, addr))
 
     async def handle_safe(self, data, addr):
-        # Acquire semaphore for the duration of processing
         async with self.sem:
             await self.handle(data, addr)
 
@@ -146,7 +140,7 @@ async def main() -> None:
         else:
             sys.exit(1)
 
-    # Configuration validation (can be skipped with --skip-validation)
+    # Configuration validation
     if args.validate_only:
         logger.info(">>> Phase 1.5: Configuration Validation")
         is_valid, errors, warnings = validate_config(config)
@@ -169,7 +163,7 @@ async def main() -> None:
         config.setdefault('server', {})['bind_ip'] = ["0.0.0.0", "::"]
 
     setup_logger(config)
-    logger.info("Starting DNS Filter Server v4.6.0 (Optimized)")
+    logger.info("Starting DNS Filter Server v4.7.0 (DoH/DoT)")
     
     logger.info(">>> Phase 2: Component Initialization")
     
@@ -196,10 +190,9 @@ async def main() -> None:
     upstream = UpstreamManager(config.get('upstream', {}))
     monitor_task = asyncio.create_task(upstream.start_monitor())
     
-    # Startup checks
     if config.get('upstream', {}).get('startup_check_enabled', True):
         logger.info("Performing startup upstream health check...")
-        await asyncio.sleep(1)  # Give monitor time to do initial check
+        await asyncio.sleep(1)
     
     geoip_lookup = GeoIPLookup(config)
     
@@ -237,10 +230,17 @@ async def main() -> None:
 
     udp_ports = get_ports('port_udp', [53])
     tcp_ports = get_ports('port_tcp', [53])
+    
+    # DoT/DoH ports from TLS context
+    tls_cfg = config.get('server', {}).get('tls', {})
+    dot_ports_val = tls_cfg.get('port_dot', [853])
+    doh_ports_val = tls_cfg.get('port_doh', [443])
+    dot_ports = dot_ports_val if isinstance(dot_ports_val, list) else [dot_ports_val]
+    doh_ports = doh_ports_val if isinstance(doh_ports_val, list) else [doh_ports_val]
 
-    # Default concurrency limit 1000, can be made configurable
     udp_concurrency = config.get('server', {}).get('udp_concurrency', 1000)
 
+    # Standard UDP/TCP listeners
     for ip in listen_ips:
         for port in udp_ports:
             try:
@@ -263,6 +263,97 @@ async def main() -> None:
                 logger.info(f"✓ TCP Listening on {ip}:{port}")
             except Exception as e:
                 logger.error(f"✗ TCP Bind Error {ip}:{port}: {e}")
+
+    # DoT/DoH listeners (require SSL config)
+    tls_cfg = config.get('server', {}).get('tls', {})
+    if tls_cfg.get('enabled', False):
+        logger.info(">>> Phase 3.5: Initializing Secure DNS (DoH/DoT)")
+        
+        cert_file = tls_cfg.get('cert_file')
+        key_file = tls_cfg.get('key_file')
+        ca_file = tls_cfg.get('ca_file')
+        
+        logger.info(f"TLS Configuration:")
+        logger.info(f"  Certificate: {cert_file}")
+        logger.info(f"  Private Key: {key_file}")
+        logger.info(f"  CA File: {ca_file if ca_file else 'None (client cert verification disabled)'}")
+        logger.info(f"  DoT Enabled: {tls_cfg.get('enable_dot', True)}")
+        logger.info(f"  DoH Enabled: {tls_cfg.get('enable_doh', True)}")
+        logger.info(f"  DoH Paths: {tls_cfg.get('doh_paths', ['/dns-query'])}")
+
+        if cert_file and key_file:
+            try:
+                ssl_context = create_ssl_context(cert_file, key_file, ca_file)
+                
+                # DoT listeners
+                if tls_cfg.get('enable_dot', True):
+                    logger.info("Starting DNS over TLS (DoT) listeners...")
+                    dot_count = 0
+                    for ip in listen_ips:
+                        for port in dot_ports:
+                            try:
+                                dot_server = DoTServer(handler, ip, port)
+                                server = await asyncio.start_server(
+                                    dot_server.handle_client,
+                                    ip, port,
+                                    ssl=ssl_context
+                                )
+                                servers.append(server)
+                                dot_count += 1
+                                logger.info(f"✓ DoT Listening on {ip}:{port} (RFC 7858)")
+                            except Exception as e:
+                                logger.error(f"✗ DoT Bind Error {ip}:{port}: {e}")
+                    
+                    if dot_count > 0:
+                        logger.info(f"✓ DoT service started on {dot_count} endpoint(s)")
+                    else:
+                        logger.warning("⚠ DoT enabled but no listeners started")
+                else:
+                    logger.info("DoT disabled in configuration")
+                
+                # DoH listeners
+                if tls_cfg.get('enable_doh', True):
+                    logger.info("Starting DNS over HTTPS (DoH) listeners...")
+                    doh_paths = tls_cfg.get('doh_paths', ['/dns-query'])
+                    if isinstance(doh_paths, str):
+                        doh_paths = [doh_paths]
+                    doh_strict = tls_cfg.get('doh_strict_paths', False)
+                    
+                    logger.info(f"  DoH Paths: {doh_paths}")
+                    logger.info(f"  Strict Path Mode: {doh_strict}")
+                    
+                    doh_count = 0
+                    for ip in listen_ips:
+                        for port in doh_ports:
+                            try:
+                                doh_server = DoHServer(handler, ip, port, doh_paths, doh_strict)
+                                server = await asyncio.start_server(
+                                    doh_server.handle_client,
+                                    ip, port,
+                                    ssl=ssl_context
+                                )
+                                servers.append(server)
+                                doh_count += 1
+                                logger.info(f"✓ DoH Listening on {ip}:{port} (RFC 8484)")
+                            except Exception as e:
+                                logger.error(f"✗ DoH Bind Error {ip}:{port}: {e}")
+                    
+                    if doh_count > 0:
+                        logger.info(f"✓ DoH service started on {doh_count} endpoint(s)")
+                        for path in doh_paths:
+                            logger.info(f"  Client URL: https://{listen_ips[0]}:{doh_ports[0]}{path}")
+                    else:
+                        logger.warning("⚠ DoH enabled but no listeners started")
+                else:
+                    logger.info("DoH disabled in configuration")
+                    
+            except Exception as e:
+                logger.error(f"✗ Failed to initialize secure DNS: {e}")
+                logger.error("Continuing with standard DNS only (UDP/TCP)")
+        else:
+            logger.warning("⚠ TLS enabled but cert_file/key_file not configured - skipping DoH/DoT")
+    else:
+        logger.info("TLS disabled - DoH/DoT not available (set server.tls.enabled: true to enable)")
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(shutdown(s, stop_event)))
@@ -289,3 +380,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+
