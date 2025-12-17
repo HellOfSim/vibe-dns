@@ -24,6 +24,11 @@ class DoTServer:
 
     async def handle_client(self, reader, writer):
         addr = writer.get_extra_info('peername')
+        if not addr:
+            # Cannot identify peer, abort
+            writer.close()
+            return
+
         ssl_obj = writer.get_extra_info('ssl_object')
         
         # Extract TLS info
@@ -50,44 +55,45 @@ class DoTServer:
         }
         
         queries_handled = 0
-        bytes_sent = 0
-        bytes_received = 0
         
         try:
-            len_bytes = await reader.readexactly(2)
-            length = int.from_bytes(len_bytes, 'big')
-            bytes_received = length + 2
-            
-            logger.debug(f"DoT {addr[0]}:{addr[1]} - Receiving query ({length} bytes)")
-            
-            data = await reader.readexactly(length)
-            
-            resp = await self.handler.process_query(data, addr, meta)
-            
-            if resp:
-                resp_len = len(resp)
-                bytes_sent = resp_len + 2
-                writer.write(len(resp).to_bytes(2, 'big') + resp)
-                await writer.drain()
-                queries_handled = 1
-                logger.debug(f"DoT {addr[0]}:{addr[1]} - Sent response ({resp_len} bytes)")
-            else:
-                logger.warning(f"DoT {addr[0]}:{addr[1]} - No response generated")
+            while True:
+                try:
+                    # Read length (2 bytes)
+                    len_bytes = await reader.readexactly(2)
+                    length = int.from_bytes(len_bytes, 'big')
+                    
+                    # Read Query
+                    data = await reader.readexactly(length)
+                    
+                    # Process
+                    resp = await self.handler.process_query(data, addr, meta)
+                    
+                    if resp:
+                        # Write response length + response
+                        writer.write(len(resp).to_bytes(2, 'big') + resp)
+                        await writer.drain()
+                        queries_handled += 1
+                    else:
+                        # Handler dropped query, but keep connection open
+                        pass
+                        
+                except asyncio.IncompleteReadError:
+                    # Connection closed by client
+                    break
                 
-        except asyncio.IncompleteReadError:
-            logger.debug(f"DoT {addr[0]}:{addr[1]} - Connection closed by client (incomplete read)")
         except ssl.SSLError as e:
             logger.warning(f"DoT {addr[0]}:{addr[1]} - SSL Error: {e}")
         except Exception as e:
             logger.error(f"DoT {addr[0]}:{addr[1]} - Error: {e}", exc_info=True)
         finally:
             logger.info(f"DoT {addr[0]}:{addr[1]} - Session closed "
-                       f"(Queries: {queries_handled}, RX: {bytes_received}B, TX: {bytes_sent}B)")
+                       f"(Queries: {queries_handled})")
             try:
                 writer.close()
                 await writer.wait_closed()
             except Exception as e:
-                logger.debug(f"DoT {addr[0]}:{addr[1]} - Error closing connection: {e}")
+                pass
 
 
 class DoHServer:
@@ -115,6 +121,10 @@ class DoHServer:
 
     async def handle_client(self, reader, writer):
         addr = writer.get_extra_info('peername')
+        if not addr:
+            writer.close()
+            return
+
         ssl_obj = writer.get_extra_info('ssl_object')
         
         # Extract TLS info
@@ -189,7 +199,11 @@ class DoHServer:
             
             while True:
                 # Read data from client
-                data = await reader.read(65535)
+                try:
+                    data = await reader.read(65535)
+                except Exception:
+                    break
+
                 if not data:
                     break
                 
@@ -206,7 +220,7 @@ class DoHServer:
                         path = headers_dict.get(b':path', b'').decode('utf-8')
                         authority = headers_dict.get(b':authority', b'').decode('utf-8')
                         
-                        logger.info(f"DoH {addr[0]}:{addr[1]} - Stream {stream_id}: {method} {path}")
+                        logger.debug(f"DoH {addr[0]}:{addr[1]} - Stream {stream_id}: {method} {path}")
                         
                         streams[stream_id] = {
                             'method': method,
@@ -222,7 +236,6 @@ class DoHServer:
                         stream_id = event.stream_id
                         if stream_id in streams:
                             streams[stream_id]['data'] += event.data
-                            logger.debug(f"DoH {addr[0]}:{addr[1]} - Stream {stream_id}: Received {len(event.data)} bytes")
                     
                     elif isinstance(event, StreamEnded):
                         # Request complete, process it
@@ -242,21 +255,14 @@ class DoHServer:
                         # Validate path
                         if request_path not in self.paths:
                             if self.strict_paths:
-                                logger.warning(f"DoH {addr[0]}:{addr[1]} - Stream {stream_id}: Path rejected (strict mode). Requested: '{request_path}', Allowed: {self.paths}")
-                                # Send 404
-                                response_headers = [
-                                    (':status', '404'),
-                                    ('content-type', 'text/plain'),
-                                ]
+                                logger.warning(f"DoH {addr[0]}:{addr[1]} - Stream {stream_id}: Path rejected. Requested: '{request_path}'")
+                                response_headers = [(':status', '404')]
                                 h2_conn.send_headers(stream_id, response_headers)
                                 h2_conn.send_data(stream_id, b'Not Found', end_stream=True)
                                 writer.write(h2_conn.data_to_send())
                                 await writer.drain()
-                                bytes_sent += len(h2_conn.data_to_send())
                                 del streams[stream_id]
                                 continue
-                            else:
-                                logger.debug(f"DoH {addr[0]}:{addr[1]} - Stream {stream_id}: Path '{request_path}' not in {self.paths} but strict mode disabled")
                         
                         dns_data = None
                         
@@ -270,54 +276,13 @@ class DoHServer:
                                     if missing_padding:
                                         b64_data += '=' * (4 - missing_padding)
                                     dns_data = base64.urlsafe_b64decode(b64_data)
-                                    logger.debug(f"DoH {addr[0]}:{addr[1]} - Stream {stream_id}: GET query decoded ({len(dns_data)} bytes)")
-                                except Exception as e:
-                                    logger.warning(f"DoH {addr[0]}:{addr[1]} - Stream {stream_id}: GET decode error: {e}")
-                                    response_headers = [(':status', '400')]
-                                    h2_conn.send_headers(stream_id, response_headers)
-                                    h2_conn.send_data(stream_id, b'Bad Request', end_stream=True)
-                                    writer.write(h2_conn.data_to_send())
-                                    await writer.drain()
-                                    del streams[stream_id]
-                                    continue
-                            else:
-                                logger.warning(f"DoH {addr[0]}:{addr[1]} - Stream {stream_id}: GET missing dns parameter")
-                                response_headers = [(':status', '400')]
-                                h2_conn.send_headers(stream_id, response_headers)
-                                h2_conn.send_data(stream_id, b'Bad Request', end_stream=True)
-                                writer.write(h2_conn.data_to_send())
-                                await writer.drain()
-                                del streams[stream_id]
-                                continue
+                                except Exception:
+                                    pass
                         
                         elif method == 'POST':
-                            # POST: DNS wire format in body
-                            content_type = stream_info['headers'].get(b'content-type', b'').decode('utf-8')
-                            if 'application/dns-message' not in content_type:
-                                logger.warning(f"DoH {addr[0]}:{addr[1]} - Stream {stream_id}: Invalid content-type: {content_type}")
-                                response_headers = [(':status', '415')]
-                                h2_conn.send_headers(stream_id, response_headers)
-                                h2_conn.send_data(stream_id, b'Unsupported Media Type', end_stream=True)
-                                writer.write(h2_conn.data_to_send())
-                                await writer.drain()
-                                del streams[stream_id]
-                                continue
-                            
                             dns_data = request_data
-                            logger.debug(f"DoH {addr[0]}:{addr[1]} - Stream {stream_id}: POST body ({len(dns_data)} bytes)")
-                        
-                        else:
-                            logger.warning(f"DoH {addr[0]}:{addr[1]} - Stream {stream_id}: Unsupported method: {method}")
-                            response_headers = [(':status', '405')]
-                            h2_conn.send_headers(stream_id, response_headers)
-                            h2_conn.send_data(stream_id, b'Method Not Allowed', end_stream=True)
-                            writer.write(h2_conn.data_to_send())
-                            await writer.drain()
-                            del streams[stream_id]
-                            continue
                         
                         if not dns_data:
-                            logger.warning(f"DoH {addr[0]}:{addr[1]} - Stream {stream_id}: No DNS data")
                             response_headers = [(':status', '400')]
                             h2_conn.send_headers(stream_id, response_headers)
                             h2_conn.send_data(stream_id, b'Bad Request', end_stream=True)
@@ -327,17 +292,12 @@ class DoHServer:
                             continue
                         
                         # Process DNS query
-                        logger.debug(f"DoH {addr[0]}:{addr[1]} - Stream {stream_id}: Processing DNS query ({len(dns_data)} bytes)")
-                        
-                        # Add path information to query meta
                         req_meta = meta.copy()
                         req_meta['doh_path'] = request_path
 
                         dns_response = await self.handler.process_query(dns_data, addr, req_meta)
                         
                         if dns_response:
-                            duration_ms = (time.time() - stream_info['start_time']) * 1000
-                            
                             # Send response
                             response_headers = [
                                 (':status', '200'),
@@ -352,40 +312,33 @@ class DoHServer:
                             writer.write(data_to_send)
                             await writer.drain()
                             bytes_sent += len(data_to_send)
-                            
                             queries_handled += 1
-                            logger.info(f"DoH {addr[0]}:{addr[1]} - Stream {stream_id}: {method} {path} → 200 OK ({len(dns_response)} bytes, {duration_ms:.1f}ms)")
                         else:
-                            logger.error(f"DoH {addr[0]}:{addr[1]} - Stream {stream_id}: Handler returned no response")
+                            # 500 Error if handler returns None
                             response_headers = [(':status', '500')]
                             h2_conn.send_headers(stream_id, response_headers)
-                            h2_conn.send_data(stream_id, b'Internal Server Error', end_stream=True)
+                            h2_conn.send_data(stream_id, b'Internal Error', end_stream=True)
                             writer.write(h2_conn.data_to_send())
                             await writer.drain()
                         
                         del streams[stream_id]
                     
                     elif isinstance(event, ConnectionTerminated):
-                        logger.debug(f"DoH {addr[0]}:{addr[1]} - Connection terminated")
                         break
                     
                     elif isinstance(event, StreamReset):
                         stream_id = event.stream_id
-                        logger.debug(f"DoH {addr[0]}:{addr[1]} - Stream {stream_id} reset")
                         if stream_id in streams:
                             del streams[stream_id]
                 
-                # Send any pending data
+                # Send any pending data (e.g. window updates)
                 data_to_send = h2_conn.data_to_send()
                 if data_to_send:
                     writer.write(data_to_send)
                     await writer.drain()
-                    bytes_sent += len(data_to_send)
             
             session_duration = time.time() - session_start
-            logger.info(f"DoH {addr[0]}:{addr[1]} - Session closed "
-                       f"(Queries: {queries_handled}, RX: {bytes_received}B, TX: {bytes_sent}B, "
-                       f"Duration: {session_duration:.2f}s)")
+            logger.info(f"DoH {addr[0]}:{addr[1]} - Session closed (Queries: {queries_handled}, Duration: {session_duration:.2f}s)")
         
         except Exception as e:
             logger.error(f"DoH {addr[0]}:{addr[1]} - Error: {e}", exc_info=True)
@@ -393,8 +346,8 @@ class DoHServer:
             try:
                 writer.close()
                 await writer.wait_closed()
-            except Exception as e:
-                logger.debug(f"DoH {addr[0]}:{addr[1]} - Error closing connection: {e}")
+            except Exception:
+                pass
 
 
 def create_ssl_context(cert_file: str, key_file: str, ca_file: Optional[str] = None) -> ssl.SSLContext:
@@ -405,35 +358,21 @@ def create_ssl_context(cert_file: str, key_file: str, ca_file: Optional[str] = N
     
     try:
         context.load_cert_chain(certfile=cert_file, keyfile=key_file)
-        logger.info("✓ Certificate chain loaded successfully")
     except Exception as e:
         logger.error(f"✗ Failed to load certificate chain: {e}")
         raise
     
     if ca_file:
-        try:
-            context.load_verify_locations(cafile=ca_file)
-            context.verify_mode = ssl.CERT_REQUIRED
-            logger.info(f"✓ Client certificate verification enabled (CA: {ca_file})")
-        except Exception as e:
-            logger.error(f"✗ Failed to load CA file: {e}")
-            raise
+        context.load_verify_locations(cafile=ca_file)
+        context.verify_mode = ssl.CERT_REQUIRED
     else:
         context.verify_mode = ssl.CERT_NONE
-        logger.info("Client certificate verification disabled")
     
-    # Modern TLS settings
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.set_ciphers('ECDHE+AESGCM:ECDHE+CHACHA20:DHE+AESGCM:DHE+CHACHA20:!aNULL:!MD5:!DSS')
     
-    # Configure ALPN to only advertise HTTP/2 (h2)
-    # This forces clients to use HTTP/2
-    try:
-        context.set_alpn_protocols(['h2'])
-        logger.info("✓ SSL context configured (Min TLS: 1.2, ALPN: h2, Modern cipher suite)")
-    except Exception as e:
-        logger.warning(f"Could not set ALPN protocols: {e}")
-        logger.info("✓ SSL context configured (Min TLS: 1.2, Modern cipher suite)")
+    # Enable H2 negotiation for DoH, but be compatible with DoT
+    context.set_alpn_protocols(['h2', 'http/1.1', 'dot'])
     
     return context
 

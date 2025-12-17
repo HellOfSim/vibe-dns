@@ -2,14 +2,11 @@
 # filename: resolver.py
 # -----------------------------------------------------------------------------
 # Project: Filtering DNS Server (Refactored)
-# Version: 7.9.0 (Added SNI/DoH-Path Support & Debug Logging)
+# Version: 8.0.0 (Fixed Cache Logic & Return Types)
 # -----------------------------------------------------------------------------
 """
 Core DNS Resolution logic.
 Matches filtering flow: Query Checks -> Upstream -> Answer Checks.
-Implements 'filter' mode to strip specific blocked IPs from responses.
-Enforces strict short-circuiting: Once an Action (BLOCK/DROP/ALLOW) is hit, 
-processing stops immediately.
 """
 
 import asyncio
@@ -223,18 +220,14 @@ class DNSHandler:
         self.ecs_override_ipv4 = server_cfg.get('ecs_override_ipv4')
         self.ecs_override_ipv6 = server_cfg.get('ecs_override_ipv6')
         
-        # PTR Check Configuration
         self.ptr_check_mode = self.config.get('filtering', {}).get('ptr_check', 'none').lower()
         if self.ptr_check_mode not in ['strict', 'none']:
-            logger.warning(f"Invalid ptr_check mode '{self.ptr_check_mode}', defaulting to 'none'")
             self.ptr_check_mode = 'none'
 
-        # PTR Check RCODE
         ptr_rcode_str = self.config.get('filtering', {}).get('ptr_check_rcode', 'FORMERR').upper()
         try:
             self.ptr_check_rcode = getattr(dns.rcode, ptr_rcode_str)
         except AttributeError:
-            logger.warning(f"Invalid ptr_check_rcode '{ptr_rcode_str}', defaulting to FORMERR")
             self.ptr_check_rcode = dns.rcode.SERVFAIL
 
         self.group_ip_map: Dict[str, str] = {}
@@ -246,8 +239,7 @@ class DNSHandler:
         self.group_cidr_list: List[Tuple[str, str]] = []
         self.group_geoip_list: List[Tuple[str, str]] = []
         self.group_default_actions: Dict[str, str] = {}
-
-        self.group_domain_list: List[Tuple[str, str]] = []  # (domain_pattern, group_name)
+        self.group_domain_list: List[Tuple[str, str]] = []
 
         self._build_client_maps(groups or {})
         
@@ -256,7 +248,6 @@ class DNSHandler:
     def _build_client_maps(self, groups: Dict[str, list]):
         for gname, identifiers in groups.items():
             if not identifiers: continue
-            default_action = None
             start_idx = 0
             if identifiers and isinstance(identifiers[0], dict):
                 if 'default_action' in identifiers[0]:
@@ -270,7 +261,6 @@ class DNSHandler:
                     domain_pattern = ident_lower[7:].strip().lstrip('.')
                     if domain_pattern:
                         self.group_domain_list.append((domain_pattern, gname))
-                        logger.debug(f"Group '{gname}': Added domain selector '{domain_pattern}'")
                     continue
                 if ident_lower.startswith('server_ip:'):
                     self.group_srv_ip_map[ident_lower[10:]] = gname
@@ -327,11 +317,9 @@ class DNSHandler:
             if len(parts) == 4:
                 try:
                     for part in parts:
-                        if not 0 <= int(part) <= 255:
-                            return None
+                        if not 0 <= int(part) <= 255: return None
                     return ".".join(parts[::-1])
-                except ValueError:
-                    return None
+                except ValueError: return None
         elif qname_lower.endswith('.ip6.arpa'):
             base = qname_lower[:-9]
             parts = base.split('.')
@@ -343,8 +331,7 @@ class DNSHandler:
                     ip = ":".join(hex_str[i:i+4] for i in range(0, 32, 4))
                     ipaddress.IPv6Address(ip)
                     return ip
-                except ValueError:
-                    return None
+                except ValueError: return None
         return None
 
     def _apply_mask(self, ip_str: str, mask: int) -> Tuple[str, int]:
@@ -358,32 +345,21 @@ class DNSHandler:
                 m = min(max(mask, 0), 128)
                 net = ipaddress.IPv6Network(f"{ip_str}/{m}", strict=False)
                 return str(net.network_address), m
-        except Exception:
-            return ip_str, 0
+        except Exception: return ip_str, 0
 
     def identify_by_domain(self, qname_norm: str, req_logger) -> str | None:
-        """Match query domain against domain-based group selectors."""
-        if not self.group_domain_list:
-            return None
-        
-        # Remove trailing dot if present
+        if not self.group_domain_list: return None
         qname_clean = qname_norm.rstrip('.')
-        
         for domain_pattern, gname in self.group_domain_list:
-            # Exact match
             if qname_clean == domain_pattern:
                 req_logger.info(f"Client identified as group '{gname}'. Reason: Domain exact match '{domain_pattern}'")
                 return gname
-            
-            # Suffix match (e.g., "home" matches "printer.home", "foo.bar.home")
             if qname_clean.endswith('.' + domain_pattern):
                 req_logger.info(f"Client identified as group '{gname}'. Reason: Domain suffix match '*.{domain_pattern}'")
                 return gname
-        
         return None
 
     def identify_client(self, addr, meta, req_logger) -> str | None:
-        # Extract all potential identifiers
         srv_ip = (meta.get('server_ip') or '').lower()
         srv_port = str(meta.get('server_port', ''))
         sni = (meta.get('sni') or '').lower()
@@ -394,81 +370,17 @@ class DNSHandler:
         mac = meta.get('mac_override') or self.mac_mapper.get_mac(source_ip) or ""
         mac_lower = mac.lower()
 
-        # Debug logging of found arguments
-        debug_args = []
-        debug_args.append(f"IP={match_ip}")
-        debug_args.append(f"SrvIP={srv_ip}")
-        debug_args.append(f"SrvPort={srv_port}")
-        debug_args.append(f"SNI={sni if sni else 'N/A'}")
-        debug_args.append(f"DoH={doh_path if doh_path else 'N/A'}")
-        debug_args.append(f"MAC={mac if mac else 'N/A'}")
-
-        geo_status = "Disabled/NotLoaded"
-        if self.geoip and self.geoip.enabled:
-            try:
-                geo_data = self.geoip.lookup(match_ip)
-                if geo_data:
-                    cc = geo_data.get('country_code', 'Unknown')
-                    geo_status = f"{cc}"
-                else:
-                    geo_status = "NoMatch"
-            except: 
-                geo_status = "Error"
-        
-        debug_args.append(f"GeoIP={geo_status}")
-        
-        req_logger.debug(f"Client Identification Args: {', '.join(debug_args)}")
-
-        # Matching Logic (Order matters)
-        # 1. Server IP
-        if srv_ip in self.group_srv_ip_map:
-            gname = self.group_srv_ip_map[srv_ip]
-            req_logger.info(f"Client identified as group '{gname}'. Reason: Matched Listening IP '{srv_ip}'")
-            return gname
-        
-        # 2. Server Port
-        if srv_port in self.group_srv_port_map:
-            gname = self.group_srv_port_map[srv_port]
-            req_logger.info(f"Client identified as group '{gname}'. Reason: Matched Listening Port '{srv_port}'")
-            return gname
-        
-        # 3. SNI (New)
-        if sni and sni in self.group_sni_map:
-            gname = self.group_sni_map[sni]
-            req_logger.info(f"Client identified as group '{gname}'. Reason: Matched SNI '{sni}'")
-            return gname
-
-        # 4. DoH Path (New)
-        if doh_path and doh_path in self.group_doh_path_map:
-            gname = self.group_doh_path_map[doh_path]
-            req_logger.info(f"Client identified as group '{gname}'. Reason: Matched DoH Path '{doh_path}'")
-            return gname
-
-        # 5. MAC
-        if mac_lower and mac_lower in self.group_mac_map:
-            gname = self.group_mac_map[mac_lower]
-            req_logger.info(f"Client identified as group '{gname}'. Reason: Matched MAC '{mac}'")
-            return gname
-
-        # 6. IP
-        if match_ip_lower in self.group_ip_map:
-            gname = self.group_ip_map[match_ip_lower]
-            req_logger.info(f"Client identified as group '{gname}'. Reason: Matched IP '{match_ip}'")
-            return gname
-
-        # 7. CIDR
+        if srv_ip in self.group_srv_ip_map: return self.group_srv_ip_map[srv_ip]
+        if srv_port in self.group_srv_port_map: return self.group_srv_port_map[srv_port]
+        if sni and sni in self.group_sni_map: return self.group_sni_map[sni]
+        if doh_path and doh_path in self.group_doh_path_map: return self.group_doh_path_map[doh_path]
+        if mac_lower and mac_lower in self.group_mac_map: return self.group_mac_map[mac_lower]
+        if match_ip_lower in self.group_ip_map: return self.group_ip_map[match_ip_lower]
         for cidr, gname in self.group_cidr_list:
-            if is_ip_in_network(match_ip, cidr):
-                req_logger.info(f"Client identified as group '{gname}'. Reason: IP '{match_ip}' is in Subnet '{cidr}'")
-                return gname
-
-        # 8. GeoIP
+            if is_ip_in_network(match_ip, cidr): return gname
         if self.geoip and self.geoip.enabled and self.group_geoip_list:
             for location, gname in self.group_geoip_list:
-                if self.geoip.match_location(match_ip, location):
-                    req_logger.info(f"✓ Client identified as group '{gname}' | Reason: GeoIP Match | IP: {match_ip} | Location: {location}")
-                    return gname
-        
+                if self.geoip.match_location(match_ip, location): return gname
         return None
 
     def is_schedule_active(self, schedule_name):
@@ -492,31 +404,23 @@ class DNSHandler:
         if group and group in self.group_default_actions:
             action = self.group_default_actions[group]
             return action, "Group Default Action"
-
         if not group or group not in self.policy_map: 
             return self.DEFAULT_POLICY_SCOPE, "Default Policy"
-
         assignment = self.policy_map[group]
         default_policy = assignment.get('policy', self.DEFAULT_POLICY_SCOPE)
-        
         schedule_name = assignment.get('schedule')
         if self.is_schedule_active(schedule_name):
             sched_policy = assignment.get('schedule_policy')
-            if sched_policy:
-                req_logger.info(f"Schedule '{schedule_name}' is ACTIVE. Overriding policy {default_policy} -> {sched_policy}")
-                return sched_policy, f"Schedule '{schedule_name}'"
-        
+            if sched_policy: return sched_policy, f"Schedule '{schedule_name}'"
         return default_policy, "Policy Assignment"
 
     def create_block_response(self, request: dns.message.Message, qname_obj, qtype, force_rcode=None) -> dns.message.Message:
         reply = dns.message.make_response(request)
-        
         if force_rcode is not None:
             reply.set_rcode(force_rcode)
             return reply
         else:
             reply.set_rcode(self.block_rcode)
-
         inject_ip = None
         if self.block_ip_opt and qtype in [dns.rdatatype.A, dns.rdatatype.AAAA]:
             if self.block_ip_opt == "NULL":
@@ -528,7 +432,6 @@ class DNSHandler:
                     if qtype == dns.rdatatype.A and ip_obj.version == 4: inject_ip = self.block_ip_opt
                     elif qtype == dns.rdatatype.AAAA and ip_obj.version == 6: inject_ip = self.block_ip_opt
                 except ValueError: pass
-
         if inject_ip:
             reply.set_rcode(dns.rcode.NOERROR)
             rdata = dns.rdata.from_text(dns.rdataclass.IN, qtype, inject_ip)
@@ -539,37 +442,21 @@ class DNSHandler:
     def collapse_cnames(self, response: dns.message.Message, req_logger):
         response_cfg = self.config.get('response') or {}
         if not response_cfg.get('cname_collapse', True): return
-        
         if not response.question: return
         qname = response.question[0].name
-        
-        cname_rrsets = []
-        other_rrsets = []
-        for rrset in response.answer:
-            if rrset.rdtype == dns.rdatatype.CNAME: cname_rrsets.append(rrset)
-            else: other_rrsets.append(rrset)
-        
+        cname_rrsets = [rr for rr in response.answer if rr.rdtype == dns.rdatatype.CNAME]
+        other_rrsets = [rr for rr in response.answer if rr.rdtype != dns.rdatatype.CNAME]
         if not cname_rrsets: return
-
-        cname_chain = {}
-        for rrset in cname_rrsets: cname_chain[rrset.name] = rrset[0].target
-        
+        cname_chain = {rr.name: rr[0].target for rr in cname_rrsets}
         current = qname
         visited = set()
         depth = 0
-        
         while current in cname_chain and depth < self.MAX_CNAME_DEPTH:
-            if current in visited:
-                req_logger.warning(f"CNAME loop detected at depth {depth}: {current}")
-                return
+            if current in visited: return
             visited.add(current)
             current = cname_chain[current]
             depth += 1
-        
-        if depth >= self.MAX_CNAME_DEPTH:
-            req_logger.warning(f"CNAME chain exceeded maximum depth ({self.MAX_CNAME_DEPTH})")
-            return
-        
+        if depth >= self.MAX_CNAME_DEPTH: return
         final_target = current
         new_answer = []
         for rrset in other_rrsets:
@@ -578,33 +465,25 @@ class DNSHandler:
                 new_rrset.ttl = rrset.ttl
                 for rdata in rrset: new_rrset.add(rdata)
                 new_answer.append(new_rrset)
-        
         response.answer.clear()
         response.answer.extend(new_answer)
-        
         if not response.answer:
             empty_rcode_str = response_cfg.get('cname_empty_rcode', 'NXDOMAIN').upper()
             if empty_rcode_str == 'NOERROR': response.set_rcode(dns.rcode.NOERROR)
             else: response.set_rcode(dns.rcode.NXDOMAIN)
-        else:
-            if cname_rrsets:
-                req_logger.debug(f"CNAME Flattened: Removed {len(cname_rrsets)} CNAME(s) (depth: {depth}), kept {sum(len(r) for r in new_answer)} record(s)")
 
     def minimize_response(self, response: dns.message.Message):
         if self.config.get('response', {}).get('minimize_response', False):
-            if response.authority or response.additional:
-                response.authority.clear()
-                response.additional.clear()
+            response.authority.clear()
+            response.additional.clear()
 
     def modify_ttls(self, response: dns.message.Message, req_logger):
         response_cfg = self.config.get('response') or {}
         min_ttl = response_cfg.get('min_ttl', 0)
         max_ttl = response_cfg.get('max_ttl', 86400)
         sync_mode = response_cfg.get('ttl_sync_mode', 'none').lower()
-        
         all_rrsets = list(response.answer) + list(response.authority) + list(response.additional)
         if not all_rrsets: return
-        
         target_ttl = None
         if sync_mode != 'none' and response.answer:
             answer_ttls = [rrset.ttl for rrset in response.answer]
@@ -614,7 +493,6 @@ class DNSHandler:
                 elif sync_mode == 'highest': target_ttl = max(answer_ttls)
                 elif sync_mode == 'lowest': target_ttl = min(answer_ttls)
                 elif sync_mode == 'average': target_ttl = int(sum(answer_ttls) / len(answer_ttls))
-        
         for rrset in all_rrsets:
             if target_ttl is not None and rrset in response.answer: rrset.ttl = int(target_ttl)
             if rrset.ttl < min_ttl: rrset.ttl = int(min_ttl)
@@ -635,15 +513,17 @@ class DNSHandler:
         rcode = dns.rcode.to_text(response.rcode())
         answer_count = len(response.answer)
         req_logger.debug(f"RESPONSE: RCODE={rcode} | Answers={answer_count}")
-        if answer_count > 0:
-            for rrset in response.answer:
-                req_logger.debug(f"  - {rrset.name} {rrset.ttl} {dns.rdatatype.to_text(rrset.rdtype)}: {', '.join([r.to_text() for r in rrset])}")
 
     async def process_query(self, data, client_addr, meta=None):
         try:
             request = dns.message.from_wire(data)
         except Exception as e:
             logger.warning(f"Failed to parse DNS packet from {client_addr}: {e}")
+            return None
+
+        # FIX 1: Safety Check for client_addr (e.g. if Listener didn't capture IP)
+        if not client_addr or len(client_addr) < 1:
+            logger.warning("Query received with no client address, dropping")
             return None
 
         if not request.question: return None
@@ -680,7 +560,6 @@ class DNSHandler:
         req_logger = ContextAdapter(logger, ctx)
         req_logger.info(f"QUERY: {qname_norm} [{dns.rdatatype.to_text(qtype)}]")
 
-        # --- PTR Strict Check ---
         if qtype == dns.rdatatype.PTR and self.ptr_check_mode == 'strict':
             is_reverse = qname_norm.endswith('.in-addr.arpa') or qname_norm.endswith('.ip6.arpa')
             if is_reverse:
@@ -688,20 +567,13 @@ class DNSHandler:
                 if not extracted_ip:
                     req_logger.info(f"⛔ BLOCKED | Reason: Invalid PTR Syntax | Domain: {qname_norm} | Mode: ptr_check=strict | RCODE: {dns.rcode.to_text(self.ptr_check_rcode)}")
                     return self.create_block_response(request, q.name, qtype, force_rcode=self.ptr_check_rcode).to_wire()
-                else:
-                    req_logger.debug(f"PTR Check OK: {qname_norm} -> {extracted_ip}")
 
-        # First check domain-based group matching
         group = self.identify_by_domain(qname_norm, req_logger)
-        
-        # Fall back to client-based identification
         if not group:
             group = self.identify_client(client_addr, meta, req_logger)
-        
         group_key = group if group else "default"
 
         policy_name, policy_source = self.get_active_policy(group, req_logger)
-        
         req_logger.debug(f"DECISION: Client Group: '{group_key}' -> Policy: '{policy_name}' (Source: {policy_source})")
 
         cached_decision = self.decision_cache.get_decision(qname_norm, qtype, group_key, policy_name)
@@ -722,21 +594,23 @@ class DNSHandler:
             elif action == 'ALLOW':
                 req_logger.info(f"✓ ALLOWED (Decision Cache Hit) | Reason: {reason} | Rule: '{rule}' | List: '{list_name}'")
                 is_explicit_allow = True
+                # FIX 2: Do NOT skip DNS cache check here!
+                # We continue to check the DNS Cache below.
         
-        if not cached_decision:
-            cache_key = (qname_norm, qtype, group_key, policy_name)
-            cached_msg, ttl_remain, hits = self.cache.get_dns(qname_norm, qtype, group=group_key, scope=policy_name)
-            if cached_msg:
-                req_logger.info(f"CACHE HIT [{group_key}/{policy_name}]: TTL={int(ttl_remain)}s")
-                cached_msg.id = qid
-                self._apply_edns_options(cached_msg, self._process_edns_options(cached_msg, keep_ecs=True, keep_mac=True))
-                if self.cache.should_prefetch(cache_key, ttl_remain):
-                    asyncio.create_task(self._resolve_upstream(qname_norm, qtype, data, qid, None, policy_name, request, client_ip, req_logger, group_key, is_explicit_allow))
-                self.round_robin_answers(cached_msg, req_logger)
-                self._log_response(cached_msg, req_logger)
-                return cached_msg.to_wire()
-            else:
-                req_logger.debug(f"CACHE MISS [{group_key}/{policy_name}]: {qname_norm}")
+        # Check DNS Cache (Moved outside the 'if not cached_decision' block)
+        cache_key = (qname_norm, qtype, group_key, policy_name)
+        cached_msg, ttl_remain, hits = self.cache.get_dns(qname_norm, qtype, group=group_key, scope=policy_name)
+        if cached_msg:
+            req_logger.info(f"CACHE HIT [{group_key}/{policy_name}]: TTL={int(ttl_remain)}s")
+            cached_msg.id = qid
+            self._apply_edns_options(cached_msg, self._process_edns_options(cached_msg, keep_ecs=True, keep_mac=True))
+            if self.cache.should_prefetch(cache_key, ttl_remain):
+                asyncio.create_task(self._resolve_upstream(qname_norm, qtype, data, qid, None, policy_name, request, client_ip, req_logger, group_key, is_explicit_allow))
+            self.round_robin_answers(cached_msg, req_logger)
+            self._log_response(cached_msg, req_logger)
+            return cached_msg.to_wire()
+        else:
+            req_logger.debug(f"CACHE MISS [{group_key}/{policy_name}]: {qname_norm}")
 
         limit_action = self.rate_limiter.check(log_ip, meta.get('proto', 'udp'))
         if limit_action == "DROP": 
@@ -756,7 +630,7 @@ class DNSHandler:
             req_logger.info(f"🔇 DROPPED | Reason: {policy_source} | Group: {group_key} | Policy: DROP")
             self.decision_cache.put_decision(qname_norm, qtype, group_key, policy_name, {'action': 'DROP', 'reason': 'Category Match', 'rule': 'N/A', 'list': policy_source})
             return None
-        elif policy_name == "ALLOW":
+        elif policy_name == "ALLOW" and not is_explicit_allow:
             req_logger.info(f"✓ ALLOWED | Reason: {policy_source} | Group: {group_key} | Policy: ALLOW")
             is_explicit_allow = True
             self.decision_cache.put_decision(qname_norm, qtype, group_key, policy_name, {'action': 'ALLOW', 'reason': policy_source, 'rule': 'N/A', 'list': policy_source})
@@ -766,7 +640,6 @@ class DNSHandler:
 
         engine = self.rule_engines.get(policy_name)
         if engine and not is_explicit_allow:
-            # 1. Check PTR IP
             if qtype == dns.rdatatype.PTR:
                 target_ip = self._extract_ip_from_ptr(qname_str)
                 if target_ip:
@@ -778,7 +651,6 @@ class DNSHandler:
                         req_logger.info(f"🔇 DROPPED | Reason: PTR GeoIP/Range Match | Target IP: {target_ip} | Rule: '{m_rule}' | List: '{m_list}'")
                         return None
 
-            # 2. Categorization
             if self.categorization_enabled and engine.categorizer and engine.category_rules:
                  cat_results = engine.categorizer.classify(qname_norm)
                  for cat, score in cat_results.items():
@@ -787,7 +659,6 @@ class DNSHandler:
                          if score >= rule.get('min_confidence', 0):
                              action = rule.get('action', 'ALLOW')
                              req_logger.debug(f"DEBUG: Category '{cat}' match ({score}%) -> Rule Action: {action}")
-                             
                              if action == 'LOG':
                                  req_logger.info(f"📋 LOG | Reason: Category Match | Category: '{cat}' | Confidence: {score}% | Policy: '{policy_name}'")
                                  self.decision_cache.put_decision(qname_norm, qtype, group_key, policy_name, {'action': 'LOG', 'reason': 'Category Match', 'rule': f"Category: {cat}", 'list': policy_name})
@@ -803,9 +674,7 @@ class DNSHandler:
                                  req_logger.info(f"✓ ALLOWED | Reason: Category Match | Category: '{cat}' | Confidence: {score}% | Policy: '{policy_name}'")
                                  is_explicit_allow = True
                                  self.decision_cache.put_decision(qname_norm, qtype, group_key, policy_name, {'action': 'ALLOW', 'reason': 'Category Match', 'rule': f"Category: {cat}", 'list': policy_name})
-                                 break # Stop category loop, and due to flag set, will skip next checks
-                         else:
-                             req_logger.debug(f"DEBUG: Category '{cat}' match ({score}%) -> Below Min Confidence ({rule.get('min_confidence', 0)}%)")
+                                 break 
 
             if not is_explicit_allow:
                 h_action, h_reason, h_score = engine.check_heuristics(qname_norm, qtype)
@@ -813,30 +682,20 @@ class DNSHandler:
                     req_logger.info(f"⛔ BLOCKED | Reason: Heuristics | Domain: {qname_norm} | Score: {h_score}/5 | Details: {h_reason}")
                     self.decision_cache.put_decision(qname_norm, qtype, group_key, policy_name, {'action': 'BLOCK', 'reason': 'Heuristics', 'rule': f"Score {h_score}", 'list': 'Heuristics'})
                     return self.create_block_response(request, q.name, qtype).to_wire()
-                elif h_score > 0:
-                    req_logger.debug(f"Heuristics Monitor: {qname_norm} | score={h_score}/{engine.heuristics.block_threshold} | Detects: [{h_reason}]")
 
-            # 3. Query Type
             if not is_explicit_allow:
                 action_type, reason, _ = engine.check_type(qtype)
                 if action_type == "BLOCK":
                     req_logger.info(f"⛔ BLOCKED | Reason: Query Type Filter | Type: {dns.rdatatype.to_text(qtype)} | Details: {reason}")
-                    
-                    # Custom Logic: AAAA = NOERROR (Empty)
                     if qtype == dns.rdatatype.AAAA:
                         return self.create_block_response(request, q.name, qtype, force_rcode=dns.rcode.NOERROR).to_wire()
-
                     return self.create_block_response(request, q.name, qtype).to_wire()
                 elif action_type == "DROP":
                     req_logger.info(f"🔇 DROPPED | Reason: Query Type Filter | Type: {dns.rdatatype.to_text(qtype)} | Details: {reason}")
                     return None
 
-            # 4. Standard Blocking (Domains -> GeoIP -> Regex)
             if not is_explicit_allow:
                 action, rule, list_name = engine.is_blocked(qname_norm, geoip_lookup=self.geoip)
-                if action:
-                    req_logger.debug(f"DEBUG: Domain/GeoIP Rule Match -> Action: {action} | Rule: '{rule}' | List: '{list_name}'")
-                
                 if action == "BLOCK":
                     req_logger.info(f"⛔ BLOCKED | Reason: Domain Rule | Domain: {qname_norm} | Rule: '{rule}' | List: '{list_name}' | Policy: '{policy_name}'")
                     self.decision_cache.put_decision(qname_norm, qtype, group_key, policy_name, {'action': 'BLOCK', 'reason': 'Domain Rule', 'rule': rule, 'list': list_name})
@@ -860,6 +719,8 @@ class DNSHandler:
         final_msg.id = qid
         self._apply_edns_options(final_msg, self._process_edns_options(final_msg, keep_ecs=True, keep_mac=True))
         self._log_response(final_msg, req_logger)
+        
+        # FIX 3: Return bytes, not object
         return final_msg.to_wire()
 
     async def _resolve_upstream(self, qname_norm, qtype, data, qid, engine, policy_name, request, client_ip, req_logger, group_key="default", is_explicit_allow=False):
@@ -867,7 +728,6 @@ class DNSHandler:
         policies = self.config.get('policies') or {}
         if policy_name in policies: upstream_group = policies[policy_name].get('upstream_group', "Default")
         
-        # ECS Logic
         incoming_ecs = next((o for o in request.options if isinstance(o, dns.edns.ECSOption)), None)
         keep_ecs = (self.forward_ecs_mode in ['preserve', 'privacy'])
         keep_mac = (self.forward_mac_mode == 'preserve')
@@ -898,10 +758,8 @@ class DNSHandler:
         if self.forward_ecs_mode == 'override':
             if self.ecs_override_ipv4:
                 opts_to_keep.append(dns.edns.ECSOption(self.ecs_override_ipv4, 32))
-                req_logger.debug(f"[ECS] Override (IPv4): Forced {self.ecs_override_ipv4}/32")
             if self.ecs_override_ipv6:
                 opts_to_keep.append(dns.edns.ECSOption(self.ecs_override_ipv6, 128))
-                req_logger.debug(f"[ECS] Override (IPv6): Forced {self.ecs_override_ipv6}/128")
         elif self.forward_ecs_mode == 'add' or (self.forward_ecs_mode == 'privacy' and not has_ecs):
              try:
                 ip = ipaddress.ip_address(client_ip)
@@ -909,11 +767,9 @@ class DNSHandler:
                     mask = self.ecs_ipv4_mask if ip.version == 4 else self.ecs_ipv6_mask
                     masked_ip, src_len = self._apply_mask(str(ip), mask)
                     opts_to_keep.append(dns.edns.ECSOption(masked_ip, src_len))
-                    req_logger.debug(f"[ECS] Added Privacy ECS: {masked_ip}/{src_len} (from {client_ip})")
                 else:
                     src_len = 32 if ip.version == 4 else 128
                     opts_to_keep.append(dns.edns.ECSOption(str(ip), src_len))
-                    req_logger.debug(f"[ECS] Added ECS: {client_ip}/{src_len}")
              except: pass
 
         if self.forward_mac_mode == 'add':
@@ -921,7 +777,6 @@ class DNSHandler:
             if mac:
                 try:
                     opts_to_keep.append(dns.edns.GenericOption(65001, bytes.fromhex(mac.replace(':', '').replace('-', ''))))
-                    req_logger.debug(f"Added MAC: {mac}")
                 except: pass
         
         self._apply_edns_options(request, opts_to_keep)
@@ -942,11 +797,8 @@ class DNSHandler:
              req_logger.warning(f"Upstream sent invalid DNS data: {e}")
              return None
         
-        # --- Answer Filtering ---
-        # Flow: Domains -> ASN -> GeoIP -> IPs/CIDRs -> Regex
         if not is_explicit_allow and engine and (self.match_answers_globally or engine.has_answer_only_rules()):
             matched_action = None
-            
             for section in (response.answer, response.authority, response.additional):
                 safe_rrsets = []
                 for rrset in section:
@@ -958,14 +810,9 @@ class DNSHandler:
                     if rrset.rdtype in [dns.rdatatype.A, dns.rdatatype.AAAA]:
                         for rdata in rrset:
                             ip_text = rdata.to_text()
-                            # Priority checked inside check_answer
                             rrset_action, rrset_rule, rrset_list = engine.check_answer(
                                 None, ip_text, self.geoip, domain_hint=qname_norm, check_query_rules=self.match_answers_globally
                             )
-                            
-                            if rrset_action != "PASS":
-                                req_logger.debug(f"DEBUG: Answer Match (IP) -> Action: {rrset_action} | IP: {ip_text} | Rule: '{rrset_rule}'")
-
                             if rrset_action in ['BLOCK', 'DROP']:
                                 target_text = ip_text
                                 matched_rule = rrset_rule
@@ -977,10 +824,6 @@ class DNSHandler:
                             rrset_action, rrset_rule, rrset_list = engine.check_answer(
                                 target_norm, None, self.geoip, check_query_rules=self.match_answers_globally
                             )
-                            
-                            if rrset_action != "PASS":
-                                req_logger.debug(f"DEBUG: Answer Match (Domain) -> Action: {rrset_action} | Domain: {target_norm} | Rule: '{rrset_rule}'")
-
                             if rrset_action in ['BLOCK', 'DROP']:
                                 target_text = target_norm
                                 matched_rule = rrset_rule
@@ -991,23 +834,17 @@ class DNSHandler:
                         req_logger.info(f"🔇 DROPPED (Answer Match) | Target: {target_text} | Rule: '{matched_rule}' | List: '{matched_list}'")
                         return None
                     elif rrset_action == "BLOCK":
-                        # If filtering is ON, we exclude this RRSET and continue.
-                        # If blocking is 'block', we return the full block response.
                         if self.ip_block_mode == 'block':
-                            req_logger.info(f"⛔ BLOCKED (Answer Match) | Target: {target_text} | Rule: '{matched_rule}' | List: '{matched_list}' | Mode: block (entire response)")
+                            req_logger.info(f"⛔ BLOCKED (Answer Match) | Target: {target_text} | Rule: '{matched_rule}' | List: '{matched_list}' | Mode: block")
                             return self.create_block_response(request, request.question[0].name, qtype)
                         else:
                             matched_action = "BLOCK"
                             req_logger.info(f"⛔ BLOCKED (Answer Filter) | Stripping record: {target_text} | Rule: '{matched_rule}' | List: '{matched_list}'")
-                            # Continue loop effectively filters this RRSET by not adding it to safe_rrsets
                             continue
-                    
                     safe_rrsets.append(rrset)
-                
                 section.clear()
                 section.extend(safe_rrsets)
 
-            # If all IPs were filtered out (empty response), invoke standard block action
             has_ips = False
             for rrset in response.answer:
                 if rrset.rdtype in [dns.rdatatype.A, dns.rdatatype.AAAA]:
