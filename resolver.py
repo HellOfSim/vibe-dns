@@ -706,6 +706,9 @@ class DNSHandler:
             req_logger.info(f"✓ ALLOWED | Reason: {policy_source} | Group: {group_key} | Policy: ALLOW")
             is_explicit_allow = True
             self.decision_cache.put_decision(qname_norm, qtype, group_key, policy_name, {'action': 'ALLOW', 'reason': policy_source, 'rule': 'N/A', 'list': policy_source})
+        elif policy_name == "LOG":
+            req_logger.info(f"📋 LOG | Reason: {policy_source} | Group: {group_key} | Policy: LOG")
+            self.decision_cache.put_decision(qname_norm, qtype, group_key, policy_name, {'action': 'LOG', 'reason': policy_source, 'rule': 'N/A', 'list': policy_source})
 
         engine = self.rule_engines.get(policy_name)
         if engine and not is_explicit_allow:
@@ -731,7 +734,10 @@ class DNSHandler:
                              action = rule.get('action', 'ALLOW')
                              req_logger.debug(f"DEBUG: Category '{cat}' match ({score}%) -> Rule Action: {action}")
                              
-                             if action == 'BLOCK':
+                             if action == 'LOG':
+                                 req_logger.info(f"📋 LOG | Reason: Category Match | Category: '{cat}' | Confidence: {score}% | Policy: '{policy_name}'")
+                                 self.decision_cache.put_decision(qname_norm, qtype, group_key, policy_name, {'action': 'LOG', 'reason': 'Category Match', 'rule': f"Category: {cat}", 'list': policy_name})
+                             elif action == 'BLOCK':
                                  req_logger.info(f"⛔ BLOCKED | Reason: Category Match | Category: '{cat}' | Confidence: {score}% | Policy: '{policy_name}'")
                                  self.decision_cache.put_decision(qname_norm, qtype, group_key, policy_name, {'action': 'BLOCK', 'reason': 'Category Match', 'rule': f"Category: {cat}", 'list': policy_name})
                                  return self.create_block_response(request, q.name, qtype).to_wire()
@@ -762,12 +768,11 @@ class DNSHandler:
                 if action_type == "BLOCK":
                     req_logger.info(f"⛔ BLOCKED | Reason: Query Type Filter | Type: {dns.rdatatype.to_text(qtype)} | Details: {reason}")
                     
-                    # Custom Logic: AAAA = NOERROR (Empty), Others = NXDOMAIN
-                    target_rcode = dns.rcode.NXDOMAIN
+                    # Custom Logic: AAAA = NOERROR (Empty)
                     if qtype == dns.rdatatype.AAAA:
-                        target_rcode = dns.rcode.NOERROR
-                        
-                    return self.create_block_response(request, q.name, qtype, force_rcode=target_rcode).to_wire()
+                        return self.create_block_response(request, q.name, qtype, force_rcode=dns.rcode.NOERROR).to_wire()
+
+                    return self.create_block_response(request, q.name, qtype).to_wire()
                 elif action_type == "DROP":
                     req_logger.info(f"🔇 DROPPED | Reason: Query Type Filter | Type: {dns.rdatatype.to_text(qtype)} | Details: {reason}")
                     return None

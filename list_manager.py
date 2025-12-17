@@ -220,6 +220,7 @@ class ListManager:
             else:
                 logger.debug(f"  + Applied {action}: 0 rules")
 
+        log_lists = policy_config.get('log', [])
         allow_lists = policy_config.get('allow', [])
         block_lists = policy_config.get('block', [])
         drop_lists = policy_config.get('drop', [])
@@ -234,19 +235,23 @@ class ListManager:
         if allow_lists:
             apply_rules(allow_lists, 'ALLOW')
 
+        if log_lists:
+            apply_rules(log_lists, 'LOG')
+
         category_rules = policy_config.get('category_rules', {})
         if category_rules:
             logger.info(f"  + Configuring {len(category_rules)} category rules")
             engine.set_category_rules(category_rules)
             
+        logged_types = policy_config.get('logged_types', [])
         allowed_types = policy_config.get('allowed_types', [])
         blocked_types = policy_config.get('blocked_types', [])
         dropped_types = policy_config.get('dropped_types', [])
         
-        if allowed_types or blocked_types or dropped_types:
-            logger.info(f"  + Configuring Type Filters: Allow={allowed_types}, Block={blocked_types}, Drop={dropped_types}")
-            engine.set_type_filters(allowed_types, blocked_types, dropped_types)
-        
+        if logged_types or allowed_types or blocked_types or dropped_types:
+            logger.info(f"  + Configuring Type Filters: Log={logged_types}, Allow={allowed_types}, Block={blocked_types}, Drop={dropped_types}")
+            engine.set_type_filters(allowed_types, blocked_types, dropped_types, logged_types)
+
         return engine
 
     def get_list_rules(self, list_name):

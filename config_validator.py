@@ -615,8 +615,8 @@ class ConfigValidator:
                 action_dict = identifiers[0]
                 if 'default_action' in action_dict:
                     action = action_dict['default_action']
-                    if action not in ['ALLOW', 'BLOCK', 'DROP']:
-                        self.errors.append(f"groups.{group_name}: default_action must be 'ALLOW', 'BLOCK', or 'DROP', got '{action}'")
+                    if action not in ['LOG', 'ALLOW', 'BLOCK', 'DROP']:
+                        self.errors.append(f"groups.{group_name}: default_action must be 'LOG', 'ALLOW', 'BLOCK', or 'DROP', got '{action}'")
                     start_idx = 1
                 else:
                     self.errors.append(f"groups.{group_name}: First dict item must contain 'default_action' key")
@@ -838,9 +838,9 @@ class ConfigValidator:
                 elif upstream_group not in upstream_groups:
                     self.errors.append(f"policies.{policy_name}: References non-existent upstream group '{upstream_group}'")
 
-            # Check list references (allow, block, drop)
+            # Check list references (log, allow, block, drop)
             lists_dict = lists_cfg if isinstance(lists_cfg, dict) else {}
-            for list_type in ['allow', 'block', 'drop']:
+            for list_type in ['log', 'allow', 'block', 'drop']:
                 list_names = policy_data.get(list_type, [])
                 if not isinstance(list_names, list):
                     self.errors.append(f"policies.{policy_name}.{list_type}: Must be a list")
@@ -850,7 +850,7 @@ class ConfigValidator:
                             self.errors.append(f"policies.{policy_name}: References non-existent list '{list_name}'")
 
             # Check query types
-            for type_list in ['allowed_types', 'blocked_types', 'dropped_types']:
+            for type_list in ['logged_types', 'allowed_types', 'blocked_types', 'dropped_types']:
                 qtypes = policy_data.get(type_list, [])
                 if not isinstance(qtypes, list):
                     self.errors.append(f"policies.{policy_name}.{type_list}: Must be a list")
@@ -864,7 +864,7 @@ class ConfigValidator:
             if not isinstance(category_rules, dict):
                 self.errors.append(f"policies.{policy_name}.category_rules: Must be a dictionary")
             else:
-                valid_actions = ['ALLOW', 'BLOCK', 'DROP']
+                valid_actions = ['LOG', 'ALLOW', 'BLOCK', 'DROP']
                 for cat_name, cat_rule in category_rules.items():
                     if not isinstance(cat_rule, dict):
                         self.errors.append(f"policies.{policy_name}.category_rules.{cat_name}: Must be a dictionary")
@@ -889,7 +889,7 @@ class ConfigValidator:
                 self.errors.append("assignments: Must be a dictionary")
             return
 
-        builtin_policies = {'BLOCK', 'ALLOW', 'DROP'}
+        builtin_policies = {'LOG', 'ALLOW', 'BLOCK', 'DROP'}
         policies_dict = policies_cfg if isinstance(policies_cfg, dict) else {}
         schedules_dict = schedules_cfg if isinstance(schedules_cfg, dict) else {}
         groups_dict = groups_cfg if isinstance(groups_cfg, dict) else {}
