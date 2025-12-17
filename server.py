@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # filename: server.py
-# Version: 4.7.1 (DoH/DoT Support Fixes)
+# Version: 5.0.0 (Recursive Resolution & DNSSEC Support)
 """
-Main Server Module with DoH/DoT support
+Main Server Module with DoH/DoT support and recursive resolution.
 """
 
 import asyncio
@@ -13,7 +13,7 @@ import argparse
 import logging
 import signal
 import random
-from typing import Any
+from typing import Any, Optional
 
 import dns.message
 import dns.rdatatype
@@ -116,6 +116,38 @@ def parse_arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
+async def init_recursive_resolver(config: dict):
+    """Initialize recursive resolver if enabled"""
+    recursive_cfg = config.get('upstream', {}).get('recursive', {})
+    
+    if not recursive_cfg.get('enabled', False):
+        logger.info("Recursive resolution: DISABLED (using forwarding)")
+        return None
+    
+    try:
+        from recursive_resolver import RecursiveResolver
+        
+        logger.info(">>> Initializing Recursive Resolver")
+        resolver = RecursiveResolver(recursive_cfg)
+        
+        if not await resolver.initialize():
+            logger.error("Failed to initialize recursive resolver")
+            return None
+        
+        dnssec_mode = recursive_cfg.get('dnssec', {}).get('mode', 'none')
+        logger.info(f"Recursive resolution: ENABLED (DNSSEC mode: {dnssec_mode})")
+        
+        return resolver
+        
+    except ImportError as e:
+        logger.error(f"Recursive resolver module not found: {e}")
+        logger.error("Make sure recursive_resolver.py, dnssec_validator.py, and root_hints.py are available")
+        return None
+    except Exception as e:
+        logger.error(f"Failed to initialize recursive resolver: {e}")
+        return None
+
+
 async def main() -> None:
     args = parse_arguments()
     config: dict[str, Any] = {}
@@ -163,7 +195,7 @@ async def main() -> None:
         config.setdefault('server', {})['bind_ip'] = ["0.0.0.0", "::"]
 
     setup_logger(config)
-    logger.info("Starting DNS Filter Server v4.7.1")
+    logger.info("Starting DNS Filter Server v5.0.0")
     
     logger.info(">>> Phase 2: Component Initialization")
     
@@ -196,6 +228,9 @@ async def main() -> None:
     
     geoip_lookup = GeoIPLookup(config)
     
+    # Initialize recursive resolver (if enabled)
+    recursive_resolver = await init_recursive_resolver(config)
+    
     cache_cfg = config.get('cache', {})
     cache = DNSCache(
         size=cache_cfg.get('size', 10000),
@@ -214,7 +249,8 @@ async def main() -> None:
         mac_mapper=mac_mapper, 
         upstream=upstream, 
         cache=cache,
-        geoip=geoip_lookup
+        geoip=geoip_lookup,
+        recursive_resolver=recursive_resolver  # NEW
     )
 
     logger.info(">>> Phase 3: Starting Listeners")
@@ -275,19 +311,16 @@ async def main() -> None:
         
         logger.info(f"TLS Configuration:")
         logger.info(f"  Certificate: {cert_file}")
-        logger.info(f"  Private Key: {key_file}")
-        logger.info(f"  CA File: {ca_file if ca_file else 'None (client cert verification disabled)'}")
-        logger.info(f"  DoT Enabled: {tls_cfg.get('enable_dot', True)}")
-        logger.info(f"  DoH Enabled: {tls_cfg.get('enable_doh', True)}")
-        logger.info(f"  DoH Paths: {tls_cfg.get('doh_paths', ['/dns-query'])}")
-
+        logger.info(f"  Key: {key_file}")
+        if ca_file:
+            logger.info(f"  CA: {ca_file}")
+        
         if cert_file and key_file:
             try:
                 ssl_context = create_ssl_context(cert_file, key_file, ca_file)
                 
-                # DoT listeners
+                # DoT Listeners
                 if tls_cfg.get('enable_dot', True):
-                    logger.info("Starting DNS over TLS (DoT) listeners...")
                     dot_count = 0
                     for ip in listen_ips:
                         for port in dot_ports:
@@ -300,23 +333,18 @@ async def main() -> None:
                                 )
                                 servers.append(server)
                                 dot_count += 1
-                                logger.info(f"✓ DoT Listening on {ip}:{port} (RFC 7858)")
+                                logger.info(f"✓ DoT Listening on {ip}:{port}")
                             except Exception as e:
                                 logger.error(f"✗ DoT Bind Error {ip}:{port}: {e}")
                     
                     if dot_count > 0:
                         logger.info(f"✓ DoT service started on {dot_count} endpoint(s)")
-                    else:
-                        logger.warning("⚠ DoT enabled but no listeners started")
                 else:
                     logger.info("DoT disabled in configuration")
                 
-                # DoH listeners
+                # DoH Listeners
                 if tls_cfg.get('enable_doh', True):
-                    logger.info("Starting DNS over HTTPS (DoH) listeners...")
                     doh_paths = tls_cfg.get('doh_paths', ['/dns-query'])
-                    if isinstance(doh_paths, str):
-                        doh_paths = [doh_paths]
                     doh_strict = tls_cfg.get('doh_strict_paths', False)
                     
                     logger.info(f"  DoH Paths: {doh_paths}")

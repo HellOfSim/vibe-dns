@@ -1,4 +1,12 @@
 # =============================================================================
+# VIBE-DNS FULL CONFIGURATION
+# Version: 5.0.0 (Recursive Resolution & DNSSEC Support)
+# =============================================================================
+# This file documents ALL configuration options with explanations and examples.
+# Copy and modify sections as needed for your deployment.
+# =============================================================================
+
+# =============================================================================
 # 1. LOGGING
 # found in: utils.py, defaults.py
 # =============================================================================
@@ -28,7 +36,8 @@ logging:
 # found in: server.py, resolver.py
 # =============================================================================
 server:
-  # List of IPs to listen on. Use "0.0.0.0" for all IPv4, "::" for all IPv6.
+  # List of IPs to listen on.
+  # Use "0.0.0.0" for all IPv4, "::" for all IPv6.
   bind_ip: 
     - "0.0.0.0"
     - "::"
@@ -114,7 +123,7 @@ geoip:
 
 # =============================================================================
 # 4. UPSTREAM RESOLUTION
-# found in: upstream_manager.py
+# found in: upstream_manager.py, recursive_resolver.py
 # =============================================================================
 upstream:
   # Check if upstreams are reachable before starting the server
@@ -126,10 +135,10 @@ upstream:
   # Allow non-RFC compliant underscores in domain names (e.g., _service.example.com)
   allow_underscores: false
   
-  # Load Balancing Strategy:
+  # Load Balancing Strategy (for forwarding mode):
   # - fastest:     Use server with lowest latency (pings periodically)
   # - loadbalance: Distribute based on average response time
-  # - distributed: Weighted distribution based on latency and staleness (ensures all servers are probed)
+  # - distributed: Weighted distribution based on latency and staleness
   # - failover:    Use first server; only switch if it fails
   # - random:      Pick random server per request
   # - roundrobin:  Rotate through servers sequentially
@@ -165,13 +174,10 @@ upstream:
   # - ipv4: Only request A records (IPv4).
   # - ipv6: Only request AAAA records (IPv6).
   # - both: Request both A and AAAA records (Default).
-  # - auto: Detect based on configured bootstrap IPs. 
-  #         If all bootstrap servers are only IPv4, only request IPv4.
-  #         If all bootstrap servers are only IPv6, only request IPv6.
-  #         If all bootstrap servers are both IPv4 and IPv6, request iIPv4 and IPv6.
+  # - auto: Detect based on configured bootstrap IPs.
   bootstrap_resolution_mode: "auto"
 
-  # Upstream Server Definitions
+  # Upstream Server Definitions (for forwarding mode)
   # Syntax: protocol://host:port/path#forced_ip
   # Protocols: udp, tcp, tls (DoT), https (DoH)
   groups:
@@ -192,6 +198,135 @@ upstream:
     LocalUpstream:
       servers:
         - "udp://192.168.1.1:53"  # Local router/DNS
+
+  # =========================================================================
+  # RECURSIVE RESOLUTION (NEW in v5.0)
+  # =========================================================================
+  # When enabled, the server can resolve queries iteratively from root servers
+  # instead of forwarding to upstream resolvers. This gives you full control
+  # over DNS resolution and enables DNSSEC validation.
+  # =========================================================================
+  recursive:
+    # Master switch for recursive resolution
+    # When false (default), the server forwards queries to upstream servers.
+    # When true, the server walks the DNS tree from root servers.
+    enabled: false
+    
+    # Prefer IPv6 when querying authoritative nameservers
+    prefer_ipv6: false
+    
+    # Query timeout in seconds for each nameserver query
+    query_timeout: 5
+    
+    # NS cache size (caches discovered nameservers during resolution)
+    ns_cache_size: 10000
+    ns_cache_ttl: 86400
+    
+    # -------------------------------------------------------------------------
+    # Root Hints Configuration
+    # -------------------------------------------------------------------------
+    # Root hints tell the resolver where to find the DNS root servers.
+    # These are the starting point for all recursive resolution.
+    # -------------------------------------------------------------------------
+    root_hints:
+      # Source for root hints:
+      # - builtin: Use built-in root server list (recommended, updated periodically)
+      # - url:     Fetch from InterNIC (https://www.internic.net/domain/named.root)
+      # - file:    Load from local file in named.root format
+      source: "builtin"
+      
+      # URL to fetch named.root (when source=url)
+      url: "https://www.internic.net/domain/named.root"
+      
+      # File path to named.root (when source=file)
+      # file: "./named.root"
+      
+      # Refresh interval in seconds (for url/file sources)
+      # Root hints rarely change, daily refresh is sufficient
+      refresh_interval: 86400
+    
+    # -------------------------------------------------------------------------
+    # Trust Anchors Configuration (for DNSSEC)
+    # -------------------------------------------------------------------------
+    # Trust anchors are the root of trust for DNSSEC validation.
+    # They contain the root zone's public key (or its hash).
+    # -------------------------------------------------------------------------
+    trust_anchors:
+      # Source for trust anchors:
+      # - builtin: Use built-in root KSK (key tag 20326, current as of 2024)
+      # - url:     Fetch from IANA (https://data.iana.org/root-anchors/root-anchors.xml)
+      # - file:    Load from local file in root-anchors.xml format
+      source: "builtin"
+      
+      # URL to fetch root-anchors.xml (when source=url)
+      url: "https://data.iana.org/root-anchors/root-anchors.xml"
+      
+      # File path to root-anchors.xml (when source=file)
+      # file: "./root-anchors.xml"
+      
+      # Refresh interval in seconds (for url/file sources)
+      refresh_interval: 86400
+    
+    # -------------------------------------------------------------------------
+    # DNSSEC Validation Configuration
+    # -------------------------------------------------------------------------
+    # DNSSEC (DNS Security Extensions) provides authentication and integrity
+    # for DNS responses. When enabled, the resolver validates signatures
+    # on DNS records back to the root trust anchor.
+    # -------------------------------------------------------------------------
+    dnssec:
+      # Validation mode - controls how DNSSEC validation affects responses:
+      #
+      # - none:     No validation performed (fastest, no security)
+      #             All responses are passed through unchanged.
+      #
+      # - log:      Validate and LOG results, but never block
+      #             Useful for testing/monitoring before enforcing.
+      #             Logs show: ✓ SECURE, ○ INSECURE, ✗ BOGUS, ? INDETERMINATE
+      #
+      # - standard: Block BOGUS/INDETERMINATE, allow SECURE/INSECURE (recommended)
+      #             - SECURE:        Validated successfully, AD flag set
+      #             - INSECURE:      Zone is unsigned (no DNSSEC), passed through
+      #             - BOGUS:         Validation FAILED -> returns SERVFAIL
+      #             - INDETERMINATE: Cannot determine -> returns SERVFAIL
+      #
+      # - strict:   Only SECURE responses pass (high security, may break sites)
+      #             - SECURE:        Validated successfully, passed through
+      #             - INSECURE:      Zone is unsigned -> returns SERVFAIL
+      #             - BOGUS:         Validation failed -> returns SERVFAIL
+      #             - INDETERMINATE: Cannot determine -> returns SERVFAIL
+      #
+      # Recommendation: Start with "log" to assess impact, then move to "standard"
+      mode: "none"
+      
+      # Response code for failed DNSSEC validation (BOGUS/INDETERMINATE)
+      # Applies to 'standard' and 'strict' modes
+      # Options: SERVFAIL (recommended), REFUSED, NXDOMAIN
+      validation_failure_rcode: "SERVFAIL"
+      
+      # Response code for unsigned zones (strict mode only)
+      # When mode=strict, unsigned zones are considered invalid
+      unsigned_zone_rcode: "SERVFAIL"
+      
+      # Cache validation results to improve performance
+      cache_validated: true
+      
+      # TTL for cached BOGUS results (negative cache)
+      # Prevents repeated validation attempts for known-bad zones
+      cache_ttl: 300
+      
+      # Disable specific DNSSEC algorithms (by number)
+      # Useful for blocking weak/deprecated algorithms
+      # Common algorithms:
+      #   5  = RSASHA1 (deprecated, potentially vulnerable)
+      #   7  = RSASHA1-NSEC3-SHA1 (deprecated)
+      #   8  = RSASHA256 (recommended)
+      #   13 = ECDSAP256SHA256 (recommended)
+      #   14 = ECDSAP384SHA384
+      #   15 = ED25519 (recommended)
+      #   16 = ED448
+      # Example: [5, 7] disables RSASHA1 variants
+      disabled_algorithms: []
 
 # =============================================================================
 # 5. CACHING
@@ -303,35 +438,27 @@ categories_file: "categories.json"
 
 filtering:
   # PTR Check Mode
-  # - strict: Validate that PTR query names are valid IP-address reversals (in-addr.arpa/ip6.arpa). Block if invalid.
+  # - strict: Validate that PTR query names are valid IP-address reversals. Block if invalid.
   # - none:   No validation (Default).
   ptr_check: "none"
 
   # RCODE to return when ptr_check=strict blocks an invalid PTR query
-  # Options: FORMERR (default), SERVFAIL, REFUSED, NXDOMAIN, NOERROR
   ptr_check_rcode: "FORMERR"
 
-# --- Heuristics Engine (New) ---
+# --- Heuristics Engine ---
 heuristics:
   # Enable advanced heuristic analysis for suspicious domains
   enabled: true
   
   # Score threshold to block a domain (1-5)
-  # 1 = Slightly suspicious, 5 = Extremely suspicious
-  # Recommended: 4
   block_threshold: 4
   
   # File containing high-value targets for typosquatting checks
-  # Looks for domains that are 1 character edit away from these targets.
-  # If file not found, uses built-in defaults.
   typosquat_file: "typosquat_targets.txt"
 
   # Entropy Thresholds (Shannon Entropy 0.0 - 6.0+)
-  # Controls how "random" a domain needs to be to trigger alerts.
-  # Higher = Less sensitive (fewer false positives)
-  # Lower  = More sensitive (more blocks)
-  entropy_threshold_high: 3.8       # Adds 3 points (Likely DGA)
-  entropy_threshold_suspicious: 3.2 # Adds 1 point  (Unusual)
+  entropy_threshold_high: 3.8
+  entropy_threshold_suspicious: 3.2
 
 # =============================================================================
 # 9. CLIENT GROUPS
@@ -345,41 +472,31 @@ mac_cache_refresh_interval: 300
 # - IP Address (192.168.1.5)
 # - CIDR Subnet (192.168.1.0/24)
 # - MAC Address (aa:bb:cc:dd:ee:ff)
-# - GeoIP Tag (geoip:US, geoip:EUROPE) - Matches based on Source IP location
-# - Server Bind IP (server_ip:10.0.0.1) - useful for VLAN gateways listening on specific IPs
-# - Server Port (server_port:5353) - useful for specific listeners
-# - Query Domain (domain:home, domain:local) - Matches query TLD or domain suffix
+# - GeoIP Tag (geoip:US, geoip:EUROPE)
+# - Server Bind IP (server_ip:10.0.0.1)
+# - Server Port (server_port:5353)
+# - Query Domain (domain:home, domain:local)
 groups:
   admin_devices:
     - "10.0.0.5"
     - "AA:BB:CC:DD:EE:FF"
   
-  # Local network domains - forward to local DNS
   local_domains:
     - "domain:home"
     - "domain:local"
     - "domain:lan"
-    - "domain:internal.corp.com"
 
   iot_vlan:
-    # OPTIONAL: Set a default action for this group (ALLOW, BLOCK, DROP)
-    # If set, this overrides policies for unhandled domains, effectively acting as a whitelist mode if set to BLOCK.
-    - { default_action: "ALLOW" }
-    - "10.0.50.0/24"
-    - "server_ip:10.0.50.1"
-  
-  kids:
-    - "10.0.0.10"
-    - "geoip:NL" # Example: Apply 'kids' policy to anyone connecting from Netherlands IP
-    
-  vpn_users:
-    - "server_ip:10.8.0.1"
+    - { default_action: "BLOCK" }  # Whitelist mode
+    - "192.168.10.0/24"
 
-# Load groups from external text files (one identifier per line)
-# These files are auto-reloaded based on refresh_interval.
-group_files:
-  refresh_interval: 300
-  kids: "./groups/kids.txt"
+  kids_devices:
+    - "192.168.1.50"
+    - "192.168.1.51"
+
+  secure_devices:
+    - "192.168.1.100"
+    - "192.168.1.101"
 
 # =============================================================================
 # 10. SCHEDULES
@@ -387,122 +504,207 @@ group_files:
 # =============================================================================
 schedules:
   bedtime:
-    - { days: ["Mon", "Tue", "Wed", "Thu", "Sun"], start: "21:00", end: "07:00" }
-    - { days: ["Fri", "Sat"], start: "23:00", end: "08:00" }
-
+    - { days: ["Sun", "Mon", "Tue", "Wed", "Thu"], start: "20:00", end: "07:00" }
+    - { days: ["Fri", "Sat"], start: "22:00", end: "08:00" }
+  
   work_hours:
     - { days: ["Mon", "Tue", "Wed", "Thu", "Fri"], start: "09:00", end: "17:00" }
 
 # =============================================================================
 # 11. FILTER LISTS
-# found in: list_manager.py
+# found in: list_manager.py, filtering.py
 # =============================================================================
-# Auto-refresh interval for downloading lists (seconds)
 list_refresh_interval: 86400
 
 lists:
-  # Remote HTTP source
   ad_servers:
     - source: "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"
-      # Parsing mode:
-      # - exact:     Matches domain exactly
-      # - inclusive: Matches domain and all subdomains (example.com matches sub.example.com)
-      # - exclusive: Matches only subdomains (*.example.com)
-      hosts_domain_type: "inclusive"
   
-  # Local file source
+  malware_domains:
+    - source: "https://urlhaus.abuse.ch/downloads/hostfile/"
+  
   my_whitelist:
     - source: "./lists/whitelist.txt"
-      hosts_domain_type: "exact"
-      
-  # GeoIP blocking list (uses tags like @@CN, @@RUSSIA, @AS15169)
-  # Syntax: 
-  #   @@TAG = Block Query (ccTLD) AND Answer (IP)
-  #   @TAG  = Block Query (ccTLD) only
-  #   @AS#  = Block Answer (ASN)
+  
   geo_block:
     - source: "./lists/geo.txt"
 
 # =============================================================================
 # 12. POLICIES
-# found in: filtering.py, resolver.py
+# found in: list_manager.py, resolver.py
 # =============================================================================
-# RULE PRIORITY: ALLOW > BLOCK > DROP
-# If a rule exists in both an allowed list and a blocked list, ALLOW wins.
-#
-# PROCESSING FLOW:
-# 1. Query Analysis: Domain -> GeoIP/ccTLD -> Regex -> Heuristics
-#    (If Query is allowed explicitly, Upstream processing occurs without Answer checks)
-#
-# 2. Upstream Resolution
-#
-# 3. Answer Analysis: Domain -> ASN -> GeoIP -> IP/CIDR -> Regex
-#    (Only if Query was not explicitly allowed by a rule)
-
+# Policies define what rules apply to DNS queries.
+# NEW: resolution_mode and dnssec_mode can be set per-policy
 policies:
-  # Default policy if no group matches (Implicit)
-  Default:
+  DefaultPolicy:
+    # Resolution mode: "forward" (default) or "recursive"
+    # When "recursive", queries are resolved iteratively from root servers
+    # instead of being forwarded to upstream servers.
+    resolution_mode: "forward"
+    
     upstream_group: "Default"
+    block: ["ad_servers", "malware_domains"]
   
-  # Strict policy for Kids
   KidsPolicy:
+    resolution_mode: "forward"
     upstream_group: "Secure"
-    
-    # Lists to apply
-    allow: ["my_whitelist"]
-    block: ["ad_servers", "geo_block"]
-    # Silent drop (no response) - good for telemetry/tracking
-    drop: []
-    
-    # Query Type Filtering
-    allowed_types: ["A", "AAAA", "CNAME", "HTTPS"] # If set, only these are allowed
-    blocked_types: ["TXT", "ANY"] # Returns Block RCODE
-    dropped_types: []             # Returns nothing (timeout)
-    
-    # Category-based rules (requires categorization_enabled)
-    # actions: ALLOW, BLOCK, DROP
+    block: ["ad_servers", "malware_domains"]
     category_rules:
-      gambling:
-        min_confidence: 85  # Only block if confidence > 85%
-        action: "BLOCK"
-      adult:
-        min_confidence: 60
-        action: "BLOCK"
-      social_media:
-        min_confidence: 90
-        action: "DROP"
-
-  # Example of an "Allow-List Only" policy (Walled Garden)
+      adult: { action: "BLOCK", min_confidence: 60 }
+      gambling: { action: "BLOCK" }
+      social_media: { action: "BLOCK" }
+  
   IoTPolicy:
+    resolution_mode: "forward"
     upstream_group: "Default"
-    allow: ["my_whitelist"]
-    # Note: To make this strictly whitelist-only, set the Group's 'default_action' to BLOCK
-    # or ensure a 'block all' list is applied here.
-
-  # Local DNS
-  LocalDNS:
+    allow: ["my_whitelist"]  # Only allow whitelisted domains
+  
+  LocalPolicy:
+    resolution_mode: "forward"
     upstream_group: "LocalUpstream"
-
+  
+  # =========================================================================
+  # Example: High-Security Policy with Recursive + DNSSEC
+  # =========================================================================
+  SecurePolicy:
+    # Use recursive resolution instead of forwarding
+    resolution_mode: "recursive"
+    
+    # Override DNSSEC mode for this policy (optional)
+    # If not set, uses the global upstream.recursive.dnssec.mode setting
+    dnssec_mode: "standard"
+    
+    block: ["ad_servers", "malware_domains", "geo_block"]
+    category_rules:
+      malware: { action: "BLOCK" }
+      phishing: { action: "BLOCK" }
+  
+  # =========================================================================
+  # Example: Maximum Security (DNSSEC strict mode)
+  # =========================================================================
+  ParanoidPolicy:
+    resolution_mode: "recursive"
+    dnssec_mode: "strict"  # Only DNSSEC-validated responses allowed
+    block: ["ad_servers", "malware_domains"]
 
 # =============================================================================
-# 13. ASSIGNMENTS
+# 13. POLICY ASSIGNMENTS
 # found in: resolver.py
 # =============================================================================
 assignments:
-  # Group Name matches keys in 'groups' section
-  kids:
-    policy: "KidsPolicy"
-    schedule: "bedtime"
-    # Policy to apply when schedule is ACTIVE (Built-in policies: BLOCK, ALLOW, DROP)
-    # Can also be a custom policy name
-    schedule_policy: "BLOCK" 
-    
+  admin_devices:
+    policy: "DefaultPolicy"
+  
+  local_domains:
+    policy: "LocalPolicy"
+  
   iot_vlan:
     policy: "IoTPolicy"
-    
-  admin_devices:
-    policy: "Default"
+  
+  kids_devices:
+    policy: "KidsPolicy"
+    schedule: "bedtime"
+    schedule_policy: "BLOCK"  # Complete block during schedule
+  
+  secure_devices:
+    policy: "SecurePolicy"
+  
+  # Default assignment for unmatched clients
+  default:
+    policy: "DefaultPolicy"
 
-  local_network:
-    policy: "LocalDNS"
+# =============================================================================
+# CONFIGURATION EXAMPLES
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# EXAMPLE 1: Simple Forwarding (No Recursion)
+# -----------------------------------------------------------------------------
+# This is the default mode - all queries are forwarded to upstream servers.
+#
+# upstream:
+#   mode: "fastest"
+#   groups:
+#     Default:
+#       servers:
+#         - "udp://8.8.8.8:53"
+#         - "udp://1.1.1.1:53"
+#   recursive:
+#     enabled: false
+
+# -----------------------------------------------------------------------------
+# EXAMPLE 2: Full Recursive with DNSSEC Logging
+# -----------------------------------------------------------------------------
+# Use this to test DNSSEC impact before enforcing.
+#
+# upstream:
+#   recursive:
+#     enabled: true
+#     root_hints:
+#       source: "builtin"
+#     trust_anchors:
+#       source: "builtin"
+#     dnssec:
+#       mode: "log"  # Log validation results but never block
+
+# -----------------------------------------------------------------------------
+# EXAMPLE 3: Full Recursive with DNSSEC Enforcement
+# -----------------------------------------------------------------------------
+# Production configuration with DNSSEC validation.
+#
+# upstream:
+#   recursive:
+#     enabled: true
+#     root_hints:
+#       source: "url"
+#       url: "https://www.internic.net/domain/named.root"
+#       refresh_interval: 86400
+#     trust_anchors:
+#       source: "url"
+#       url: "https://data.iana.org/root-anchors/root-anchors.xml"
+#       refresh_interval: 86400
+#     dnssec:
+#       mode: "standard"
+#       validation_failure_rcode: "SERVFAIL"
+#       disabled_algorithms: [5, 7]  # Disable weak RSASHA1
+
+# -----------------------------------------------------------------------------
+# EXAMPLE 4: Hybrid Mode (Recursive for some, Forwarding for others)
+# -----------------------------------------------------------------------------
+# Use per-policy resolution_mode to mix forwarding and recursive.
+#
+# policies:
+#   HighSecurity:
+#     resolution_mode: "recursive"
+#     dnssec_mode: "strict"
+#   
+#   Normal:
+#     resolution_mode: "forward"
+#     upstream_group: "Default"
+#   
+#   LocalDomains:
+#     resolution_mode: "forward"
+#     upstream_group: "LocalUpstream"
+#
+# assignments:
+#   secure_devices:
+#     policy: "HighSecurity"
+#   local_domains:
+#     policy: "LocalDomains"
+#   default:
+#     policy: "Normal"
+
+# -----------------------------------------------------------------------------
+# EXAMPLE 5: Strict DNSSEC for Maximum Security
+# -----------------------------------------------------------------------------
+# WARNING: This will break access to sites without DNSSEC!
+# Many legitimate sites don't have DNSSEC deployed.
+#
+# upstream:
+#   recursive:
+#     enabled: true
+#     dnssec:
+#       mode: "strict"
+#       unsigned_zone_rcode: "SERVFAIL"
+#       validation_failure_rcode: "SERVFAIL"
 

@@ -45,7 +45,34 @@ DEFAULT_CONFIG = {
         'circuit_failure_threshold': 3,
         'circuit_recovery_timeout': 30,
         'connection_limit': 20,
-        'connection_reuse': False
+        'connection_reuse': False,
+        'recursive': {
+            'enabled': False,
+            'prefer_ipv6': False,
+            'query_timeout': 5,
+            'ns_cache_size': 10000,
+            'ns_cache_ttl': 86400,
+            'root_hints': {
+                'source': 'builtin',
+                'url': 'https://www.internic.net/domain/named.root',
+                'file': None,
+                'refresh_interval': 86400,
+            },
+            'trust_anchors': {
+                'source': 'builtin',
+                'url': 'https://data.iana.org/root-anchors/root-anchors.xml',
+                'file': None,
+                'refresh_interval': 86400,
+            },
+            'dnssec': {
+                'mode': 'none',
+                'validation_failure_rcode': 'SERVFAIL',
+                'unsigned_zone_rcode': 'SERVFAIL',
+                'cache_validated': True,
+                'cache_ttl': 300,
+                'disabled_algorithms': [],
+            },
+        },
     },
     'cache': {
         'size': 10000,
